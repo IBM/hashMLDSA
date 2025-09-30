@@ -44,9 +44,10 @@ HASHMLDSA *hashmldsa_data = NULL;
 char *signature = NULL;
 size_t signature_len = 0;
 EVP_PKEY *private_key = NULL; // to contain the private key
+OSSL_LIB_CTX *lib_ctx;        // openssl library context (to be populated by app)
 int rc = SUCCESS;             // developer defined return code
 ...
-hashmldsa_ctx = HASHMLDSA_CTX_new("ML-DSA-44");
+hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "ML-DSA-44");
 if (hashmldsa_ctx == NULL) {
     HASHMLDSA_print_last_error(stderr);
     rc = FAILURE;
@@ -96,9 +97,10 @@ size_t hashed_message_len = 0;        // to contain the length the the hashed me
 unsigned char* signature = NULL;      // to contain the signature
 size_t signature_len = 0;             // to contain the signature length
 EVP_PKEY *public_key = NULL;          // to contain the public key
+OSSL_LIB_CTX *lib_ctx;                // openssl library context (to be populated by app)
 int rc = SUCCESS;                     // developer defined return code
 ...
-hashmldsa_ctx = HASHMLDSA_CTX_new("MLDSA65"); // note the different format of the signature algorithm is also supported
+hashmldsa_ctx = HASHMLDSA_CTX_new((lib_ctx, "MLDSA65"); // note the different format of the signature algorithm is also supported
 if (hashmldsa_ctx == NULL) {
     HASHMLDSA_print_last_error(stderr);
     rc = FAILURE;
@@ -137,9 +139,10 @@ HASHMLDSA_CTX *hashmldsa_ctx = NULL;
 HASHMLDSA *hashmldsa_data = NULL;
 unsigned char* hashed_message = NULL;
 size_t hashed_message_len = 0;
+OSSL_LIB_CTX *lib_ctx; // openssl library context (to be populated by app)
 int rc = SUCCESS;      // developer defined return code
 ...
-hashmldsa_ctx = HASHMLDSA_CTX_new("ML-DSA-44");  // signature algorithm may seem unnecessary, but means we can use context for other operations
+hashmldsa_ctx = HASHMLDSA_CTX_new((lib_ctx, "ML-DSA-44");  // signature algorithm may seem unnecessary, but means we can use context for other operations
 if (hashmldsa_ctx == NULL) {
     HASHMLDSA_print_last_error(stderr);
     rc = FAILURE;

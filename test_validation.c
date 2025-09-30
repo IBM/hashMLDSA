@@ -31,6 +31,8 @@ static const char* valid_sig_alg = "ML-DSA-44";
 static const char* notapplicable_sig_alg = "ML-DSA-65";
 static const char* notvalid_sig_alg = "ED25519";
 
+static OSSL_LIB_CTX *lib_ctx;
+
 /*
  * Perform a verify given a hashed message, setting the digest on the context
  */
@@ -41,7 +43,7 @@ static int perform_verify(unsigned char* hashed_msg, size_t hashed_msg_len)
     HASHMLDSA *input_data = NULL;
     EVP_PKEY *valid_pkey = NULL; /* Will hold the key used to verify */
 
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     input_data = HASHMLDSA_new(hashmldsa_ctx);
     HASHMLDSA_set_hashed_message(input_data, hashed_msg, hashed_msg_len);
@@ -73,7 +75,7 @@ static int perform_sign(unsigned char* hashed_msg, size_t hashed_msg_len)
     unsigned char blank_buffer[10000];
     size_t signature_len =  10000;
 
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     input_data = HASHMLDSA_new(hashmldsa_ctx);
     HASHMLDSA_set_hashed_message(input_data, hashed_msg, hashed_msg_len);
@@ -179,20 +181,20 @@ static int test_validation_on_context_creation(unsigned int *passes, unsigned in
     HASHMLDSA_CTX *hashmldsa_ctx = NULL;
 
     /* invalid signature algorithms*/
-    hashmldsa_ctx = HASHMLDSA_CTX_new(NULL);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, NULL);
     check_rc(hashmldsa_ctx == NULL ? FAILURE:SUCCESS, "Context creation", testcount, "Check NULL signature algorithm", passes, failures);
 
-    hashmldsa_ctx = HASHMLDSA_CTX_new("");
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "");
     check_rc(hashmldsa_ctx == NULL ? FAILURE:SUCCESS, "Context creation", testcount, "Check blank signature algorithm", passes, failures);
 
-    hashmldsa_ctx = HASHMLDSA_CTX_new("Unknown");
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "Unknown");
     check_rc(hashmldsa_ctx == NULL ? FAILURE:SUCCESS, "Context creation", testcount, "Check unknown signature algorithm", passes, failures);
 
-    hashmldsa_ctx = HASHMLDSA_CTX_new("ED25519");
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "ED25519");
     check_rc(hashmldsa_ctx == NULL ? FAILURE:SUCCESS, "Context creation", testcount, "Check non MLDSA signature algorithm", passes, failures);
 
     /* invalid digests */
-    hashmldsa_ctx = HASHMLDSA_CTX_new("ML-DSA-87");
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "ML-DSA-87");
     check_rc(HASHMLDSA_CTX_set_message_digest(NULL, "SHA2-512", 0), "Set Digest on Context", testcount, "Check Context is NULL", passes, failures);
     check_rc(HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, NULL, 0), "Set Digest on Context", testcount, "Check NULL digest algorithm", passes, failures);
     check_rc(HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, "", 0), "Set Digest on Context", testcount, "Check Empty digest algorithm", passes, failures);
@@ -211,7 +213,7 @@ static int test_validation_on_data_creation(unsigned int *passes, unsigned int *
     check_rc(data == NULL ? FAILURE:SUCCESS, "Data creation", testcount, "Null Context", passes, failures);
 
 
-    hashmldsa_ctx = HASHMLDSA_CTX_new("ML-DSA-87");
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "ML-DSA-87");
     data = HASHMLDSA_new(hashmldsa_ctx);
 
     /* invalid digests */
@@ -268,7 +270,7 @@ static int test_validation_on_sign(unsigned int *sign_passes, unsigned int *sign
     }
 
     /* create a valid context and input data with a message (not hashed message) */
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     msg_input_data = HASHMLDSA_new(hashmldsa_ctx);
     HASHMLDSA_set_message(msg_input_data, "Here is a Message of a specific length", 38);
@@ -330,7 +332,7 @@ static int test_validation_on_sign(unsigned int *sign_passes, unsigned int *sign
 
     /* test to check that data came from a matching context */
     HASHMLDSA_CTX_free(hashmldsa_ctx);
-    hashmldsa_ctx = HASHMLDSA_CTX_new(notapplicable_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, notapplicable_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     sign_rc = HASHMLDSA_sign(hashmldsa_ctx, valid_pkey, msg_input_data, blank_buffer, &signature_len);
     check_rc(sign_rc, "Sign", testcount, "Check Context and Data Mismatch", sign_passes, sign_failures);
@@ -341,7 +343,7 @@ static int test_validation_on_sign(unsigned int *sign_passes, unsigned int *sign
      * create it
      */
     HASHMLDSA_CTX_free(hashmldsa_ctx);
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     signature_len = 10000;
     sign_rc = HASHMLDSA_sign(hashmldsa_ctx, valid_pkey, msg_input_data, blank_buffer, &signature_len);
@@ -400,7 +402,7 @@ static int test_validation_on_verify(unsigned int *passes, unsigned int *failure
     }
 
     /* create valid context and input data */
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     msg_input_data = HASHMLDSA_new(hashmldsa_ctx);
     HASHMLDSA_set_message(msg_input_data, "Here is a Message of a specific length", 38);
@@ -458,7 +460,7 @@ static int test_validation_on_verify(unsigned int *passes, unsigned int *failure
 
     /* test to show that data came from a matching context */
     HASHMLDSA_CTX_free(hashmldsa_ctx);
-    hashmldsa_ctx = HASHMLDSA_CTX_new(notapplicable_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, notapplicable_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     verify_rc = HASHMLDSA_verify(hashmldsa_ctx, valid_pkey, msg_input_data, "Signature", 9);
     check_rc(verify_rc, "Verify", testcount, "Check Context and Data Mismatch", passes, failures);
@@ -469,7 +471,7 @@ static int test_validation_on_verify(unsigned int *passes, unsigned int *failure
      * create it.
      */
     HASHMLDSA_CTX_free(hashmldsa_ctx);
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     signature_len = 10000;
     if (!HASHMLDSA_sign(hashmldsa_ctx, valid_pkey, msg_input_data, blank_buffer, &signature_len)) {
@@ -520,7 +522,7 @@ static int test_validation_on_prehash(unsigned int *passes, unsigned int *failur
     HASHMLDSA *blank_input_data = NULL;
 
     /* create a valid context and input data */
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     msg_input_data = HASHMLDSA_new(hashmldsa_ctx);
     HASHMLDSA_set_message(msg_input_data, "Here is a Message of a specific length", 38);
@@ -572,7 +574,7 @@ static int test_validation_on_prehash(unsigned int *passes, unsigned int *failur
 
     /* test to show that data came from a matching context */
     HASHMLDSA_CTX_free(hashmldsa_ctx);
-    hashmldsa_ctx = HASHMLDSA_CTX_new(notapplicable_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, notapplicable_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     create_hash_rc = HASHMLDSA_generate_hashed_message(hashmldsa_ctx, msg_input_data, blank_buffer, &hashed_message_len);
     check_rc(create_hash_rc, "PreHash", testcount, "Check Context and Data Mismatch", passes, failures);
@@ -583,7 +585,7 @@ static int test_validation_on_prehash(unsigned int *passes, unsigned int *failur
      * create it
      */
     HASHMLDSA_CTX_free(hashmldsa_ctx);
-    hashmldsa_ctx = HASHMLDSA_CTX_new(valid_sig_alg);
+    hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, valid_sig_alg);
     HASHMLDSA_CTX_set_message_digest(hashmldsa_ctx, valid_hash_msg_digest, 0);
     create_hash_rc = HASHMLDSA_generate_hashed_message(hashmldsa_ctx, msg_input_data, blank_buffer, &hashed_message_len);
     check_rc(create_hash_rc == SUCCESS ? -100:SUCCESS , "PreHash", testcount, "Check new context and old data match, plus no link to old context", passes, failures);
@@ -624,6 +626,8 @@ int main(int argc, char const *argv[])
     int rc = 0;
 
     printf("Start testing parameter validation\n");
+
+    lib_ctx = OSSL_LIB_CTX_get0_global_default();
 
     /*
      * context creation tests

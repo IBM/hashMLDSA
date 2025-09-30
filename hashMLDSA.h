@@ -19,8 +19,8 @@ limitations under the License.
 typedef struct hashMLDSA_ctx HASHMLDSA_CTX;
 typedef struct hashMLDSA HASHMLDSA;
 
-HASHMLDSA_CTX *HASHMLDSA_CTX_new(const char* sig_alg);
-HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(const char* sig_alg);
+HASHMLDSA_CTX *HASHMLDSA_CTX_new(OSSL_LIB_CTX *lib_ctx, const char* sig_alg);
+HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(OSSL_LIB_CTX *lib_ctx, const char* sig_alg);
 int HASHMLDSA_CTX_set_message_digest(HASHMLDSA_CTX *ctx, const char* digest_name, size_t hash_len);
 void HASHMLDSA_CTX_free(HASHMLDSA_CTX *ctx);
 
