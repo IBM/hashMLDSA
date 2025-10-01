@@ -1,7 +1,7 @@
 # API Documentation
 
 ```c
-HASHMLDSA_CTX *HASHMLDSA_CTX_new(const char *sig_alg_name)
+HASHMLDSA_CTX *HASHMLDSA_CTX_new(OSSL_LIB_CTX *lib_ctx, const char *sig_alg_name)
 ```
 
 **Description**:
@@ -9,6 +9,7 @@ Allocates memory for a new HASHMLDSA context structure and initializes its field
 
 **Parameters**:
 
+- *lib_ctx*: An openssl Library context. NULL is not valid. If this library context doesn't have the default provider loaded, it will be loaded into this context.
 - *sig_alg_name*: The required signature algorithm.
 
 **Returns**:
@@ -17,11 +18,16 @@ A pointer to the newly created HASHMLDSA context on success, NULL on failure.
 ---
 
 ```c
-HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(const char* sig_alg_name)
+HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(OSSL_LIB_CTX *lib_ctx, const char* sig_alg_name)
 ```
 
 **Description**:
 Allocates memory for a new HASHMLDSA context structure and initializes its fields. The only supported algorithms are ML-DSA-44, ML-DSA-65 or ML-DSA-87. Alternative names such as MLDSA44 are also allowed. It returns a pointer to the newly created context or NULL if memory allocation fails. This will force deterministic mode for signing and should only be used for testing purposes. A default digest will be assigned to this context which will have the necessary number of bits to satisfy the FIPS 204 requirements. See the documentation on this library for more details which lists the default digest assigned based on the provided signature algorithm.
+
+**Parameters**:
+
+- *lib_ctx*: An openssl Library context. NULL is not valid. If this library context doesn't have the default provider loaded, it will be loaded into this context.
+- *sig_alg_name*: The required signature algorithm.
 
 **Returns**:
 A pointer to the newly created HASHMLDSA context on success, NULL on failure.

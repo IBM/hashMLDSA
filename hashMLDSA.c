@@ -106,7 +106,7 @@ struct hashMLDSA_digest {
 };
 
 struct hashMLDSA_ctx {
-    OSSL_LIB_CTX *my_lib_ctx;
+    OSSL_LIB_CTX *lib_ctx;
     OSSL_PROVIDER *deflt;
 
     enum sig_alg_internal_id id;
@@ -159,21 +159,11 @@ static void set_error_message(const char *format, ...)
     va_end(args);
 }
 
-static int load_default_provider(HASHMLDSA_CTX *ctx)
+static int check_default_provider(HASHMLDSA_CTX *ctx)
 {
-    ctx->my_lib_ctx = OSSL_LIB_CTX_get0_global_default();
-    if (ctx->my_lib_ctx == NULL) {
-        set_error_message("Failed to load the global OpenSSL default: %s", ERR_error_string(ERR_get_error(), NULL));
-        goto error;
-    }
-
-
-    if (OSSL_PROVIDER_available(ctx->my_lib_ctx, "default") == 0) {
-        ctx->deflt = OSSL_PROVIDER_load(ctx->my_lib_ctx, "default");
-        if (ctx->deflt == NULL) {
-            set_error_message("Failed to load the default provider: %s", ERR_error_string(ERR_get_error(), NULL));
-            goto error;
-        }
+    if (OSSL_PROVIDER_available(ctx->lib_ctx, "default") == 0) {
+       set_error_message("default provider not loaded into openssl library context");
+       goto error;
     }
 
     return SUCCESS;
@@ -541,27 +531,40 @@ error:
     return FAILURE;
 }
 
-static HASHMLDSA_CTX *HASHMLDSA_CTX_new_internal(const char *sig_alg_name, int test_mode)
+static HASHMLDSA_CTX *HASHMLDSA_CTX_new_internal(OSSL_LIB_CTX *lib_ctx, const char *sig_alg_name, int test_mode)
 {
     HASHMLDSA_CTX *ctx = NULL;
     int i = 0;
+
+    if (lib_ctx == NULL) {
+        // TODO: Do we want to load the global default here or expect the client app to do it
+        // We can't replicate OpenSSL here as we can't get access to the thread local storage
+        // which it can for stored library contexts so maybe better we don't do anything with NULL
+        // lib_ctx = OSSL_LIB_CTX_get0_global_default();
+        // if (lib_ctx == NULL) { // output an error }
+        set_error_message("Library context cannot be NULL");
+        return NULL;
+    }
+
+    if (OSSL_PROVIDER_available(lib_ctx, "default") == 0) {
+       set_error_message("default provider not loaded into openssl library context");
+       return NULL;
+    }
 
     if ((ctx = OPENSSL_zalloc(sizeof(*ctx))) == NULL) {
         set_error_message("Failed to allocate memory for context");
         return NULL;
     }
 
-    if (load_default_provider(ctx) == FAILURE)
-        goto error;
-
     if (sig_alg_name == NULL || strlen(sig_alg_name) == 0) {
         set_error_message("signature algorithm is NULL or empty", sig_alg_name);
         goto error;
     }
 
+    ctx->lib_ctx = lib_ctx;
     ctx->test_mode = test_mode;
     ctx->sig_alg_name = sig_alg_name;
-    ctx->sig_alg = EVP_SIGNATURE_fetch(ctx->my_lib_ctx, sig_alg_name, NULL);
+    ctx->sig_alg = EVP_SIGNATURE_fetch(ctx->lib_ctx, sig_alg_name, NULL);
     if (ctx->sig_alg == NULL) {
         set_error_message("Failure in preparing %s signature algorithm: %s", sig_alg_name, ERR_error_string(ERR_get_error(), NULL));
         goto error;
@@ -605,13 +608,14 @@ error:
  * FIPS 204 requirements. See the documentation on this library for more details which lists the default digest
  * assigned based on the provided signature algorithm.
  *
+ * @param lib_ctx An openssl library context. NULL is not valid. The library context must have the default provider loaded otherwise it's not valid.
  * @param sig_alg_name The required signature algorithm.
  *
  * @returns: A pointer to the newly created HASHMLDSA context on success, NULL on failure.
  */
-HASHMLDSA_CTX *HASHMLDSA_CTX_new(const char *sig_alg_name)
+HASHMLDSA_CTX *HASHMLDSA_CTX_new(OSSL_LIB_CTX *lib_ctx, const char *sig_alg_name)
 {
-    return HASHMLDSA_CTX_new_internal(sig_alg_name, 0);
+    return HASHMLDSA_CTX_new_internal(lib_ctx, sig_alg_name, 0);
 }
 
 /**
@@ -625,11 +629,14 @@ HASHMLDSA_CTX *HASHMLDSA_CTX_new(const char *sig_alg_name)
  * FIPS 204 requirements. See the documentation on this library for more details which lists the default digest
  * assigned based on the provided signature algorithm.
  *
+ * @param lib_ctx An openssl library context. NULL is not valid. The library context must have the default provider loaded otherwise it's not valid.
+ * @param sig_alg_name The required signature algorithm.
+ *
  * @returns: A pointer to the newly created HASHMLDSA context on success, NULL on failure.
  */
-HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(const char* sig_alg_name)
+HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(OSSL_LIB_CTX *lib_ctx, const char* sig_alg_name)
 {
-    return HASHMLDSA_CTX_new_internal(sig_alg_name, 1);
+    return HASHMLDSA_CTX_new_internal(lib_ctx, sig_alg_name, 1);
 }
 
 /**
@@ -1054,7 +1061,7 @@ int HASHMLDSA_sign(const HASHMLDSA_CTX *ctx,
         goto error;
     }
 
-    sctx = EVP_PKEY_CTX_new_from_pkey(NULL, priv_key, NULL);
+    sctx = EVP_PKEY_CTX_new_from_pkey(ctx->lib_ctx, priv_key, NULL);
     if (sctx == NULL) {
         set_error_message("Failure in preparing signature context from private key; %s", ERR_error_string(ERR_get_error(), NULL));
         goto error;
@@ -1208,7 +1215,7 @@ int HASHMLDSA_verify(const HASHMLDSA_CTX *ctx,
         hashed_message_len = input_data->hashed_message_len;
     }
 
-    vctx = EVP_PKEY_CTX_new_from_pkey(NULL, public_key, NULL);
+    vctx = EVP_PKEY_CTX_new_from_pkey(ctx->lib_ctx, public_key, NULL);
     if (vctx == NULL) {
         set_error_message("Failure in preparing signature context: %s", ERR_error_string(ERR_get_error(), NULL));
         goto error;

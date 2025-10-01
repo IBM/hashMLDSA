@@ -29,6 +29,8 @@ typedef struct {
     EVP_PKEY *private_key;
 } Decoded_TestCase;
 
+static OSSL_LIB_CTX *lib_ctx;
+
 
 static int decode_testcase(TestCase test, Decoded_TestCase *decoded_testcase)
 {
@@ -85,9 +87,9 @@ typedef int (*create_context_and_data)(TestCase test, unsigned char det_mode, HA
 static int create_ctx_and_data(TestCase test, unsigned char det_mode, HASHMLDSA_CTX **hashmldsa_ctx, HASHMLDSA **hashmldsa_data, HASHMLDSA **hashmldsa_hash_data) {
     fprintf(stderr, "[INFO] using default hash on CONTEXT\n");
     if (det_mode == 'd')
-        *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(test.key_type);  /* this will create a deterministic signature */
+        *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(lib_ctx, test.key_type);  /* this will create a deterministic signature */
     else
-        *hashmldsa_ctx = HASHMLDSA_CTX_new(test.key_type);
+        *hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, test.key_type);
 
     if (*hashmldsa_ctx == NULL) {
         fprintf(stderr, "[ERROR] Failed to create new %s context\n", test.key_type);
@@ -135,9 +137,9 @@ error:
 static int create_ctx_with_hash_and_data(TestCase test, unsigned char det_mode, HASHMLDSA_CTX **hashmldsa_ctx, HASHMLDSA **hashmldsa_data, HASHMLDSA **hashmldsa_hash_data) {
     fprintf(stderr, "[INFO] Setting digest hash on CONTEXT to %s\n", test.hash_name);
     if (det_mode == 'd')
-        *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(test.key_type);  /* this will create a deterministic signature */
+        *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(lib_ctx, test.key_type);  /* this will create a deterministic signature */
     else
-        *hashmldsa_ctx = HASHMLDSA_CTX_new(test.key_type);
+        *hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, test.key_type);
 
     if (*hashmldsa_ctx == NULL) {
         fprintf(stderr, "[ERROR] Failed to create new %s context\n", test.key_type);
@@ -193,9 +195,9 @@ static int create_ctx_and_data_with_hash(TestCase test, unsigned char det_mode, 
     fprintf(stderr, "[INFO] setting hash on DATA to %s\n", test.hash_name);
 
     if (det_mode == 'd')
-        *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(test.key_type);  /* this will create a deterministic signature */
+        *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(lib_ctx, test.key_type);  /* this will create a deterministic signature */
     else
-        *hashmldsa_ctx = HASHMLDSA_CTX_new(test.key_type);
+        *hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, test.key_type);
 
     if (*hashmldsa_ctx == NULL) {
         fprintf(stderr, "[ERROR] Failed to create new %s context\n", test.key_type);
@@ -471,6 +473,8 @@ int main(int argc, char *argv[]) {
     create_context_and_data create_ctx_with_data;
     Decoded_TestCase decoded_testcase;
     TestCase test;
+
+    lib_ctx = OSSL_LIB_CTX_get0_global_default();
 
     numTestcases = sizeof(testcases) / sizeof(testcases[0]);
     printf("Number of testcases: %d\n", numTestcases);
