@@ -25,29 +25,66 @@ int HASHMLDSA_CTX_set_message_digest(HASHMLDSA_CTX *ctx, const char* digest_name
 void HASHMLDSA_CTX_free(HASHMLDSA_CTX *ctx);
 
 HASHMLDSA *HASHMLDSA_new(const HASHMLDSA_CTX *ctx);
-int HASHMLDSA_set_context_string(HASHMLDSA *input_data, const unsigned char* context_string, size_t context_string_len);
-int HASHMLDSA_set_message(HASHMLDSA *input_data, const unsigned char* message, size_t message_len);
-int HASHMLDSA_set_hashed_message(HASHMLDSA *input_data, const unsigned char* hashed_message, size_t hashed_message_len);
-int HASHMLDSA_override_message_digest(HASHMLDSA *input_data, const char* digest_name, size_t hash_len);
+int HASHMLDSA_set_context_string(HASHMLDSA *data, const unsigned char* context_string, size_t context_string_len);
+int HASHMLDSA_set_message(HASHMLDSA *data, const unsigned char* message, size_t message_len);
+int HASHMLDSA_set_hashed_message(HASHMLDSA *data, const unsigned char* hashed_message, size_t hashed_message_len);
+int HASHMLDSA_override_message_digest(HASHMLDSA *data, const char* digest_name, size_t hash_len);
 void HASHMLDSA_free(HASHMLDSA *data);
 
 int HASHMLDSA_print_last_error(FILE *fp);
 void HASHMLDSA_clear_last_error();
 
 int HASHMLDSA_generate_hashed_message(const HASHMLDSA_CTX *ctx,
-                      const HASHMLDSA *input_data,
-                      unsigned char *hashed_message,
-                      size_t *hashed_message_len);
+                                      const HASHMLDSA *data,
+                                      unsigned char *hashed_message,
+                                      size_t *hashed_message_len);
+
+int HASHMLDSA_generate_hashed_message_init(const HASHMLDSA_CTX *ctx,
+                                           HASHMLDSA *data,
+                                           size_t *hashed_message_len);
+int HASHMLDSA_generate_hashed_message_update(const HASHMLDSA_CTX *ctx,
+                                             HASHMLDSA *data,
+                                             const unsigned char* message_fragment,
+                                             size_t message_fragment_len);
+int HASHMLDSA_generate_hashed_message_final(const HASHMLDSA_CTX *ctx,
+                                            HASHMLDSA *data,
+                                            unsigned char *hashed_message,
+                                            size_t *hashed_message_len);
 
 int HASHMLDSA_sign(const HASHMLDSA_CTX *ctx,
                    EVP_PKEY *priv_key,
-                   const HASHMLDSA *input_data,
+                   const HASHMLDSA *data,
                    unsigned char *signature,
                    size_t *signature_len);
 
+int HASHMLDSA_sign_init(const HASHMLDSA_CTX *ctx,
+                   EVP_PKEY *priv_key,
+                   HASHMLDSA *data,
+                   size_t *signature_len);
+int HASHMLDSA_sign_update(const HASHMLDSA_CTX *ctx,
+                   HASHMLDSA *data,
+                   const unsigned char* message_fragment,
+                   size_t message_fragment_len);
+int HASHMLDSA_sign_final(const HASHMLDSA_CTX *ctx,
+                   HASHMLDSA *data,
+                   unsigned char *signature,
+                   size_t *signature_len);
+
+
 int HASHMLDSA_verify(const HASHMLDSA_CTX *ctx,
                      EVP_PKEY *public_key,
-                     const HASHMLDSA *input_data,
+                     const HASHMLDSA *data,
                      const unsigned char *signature,
                      const size_t signature_len);
 
+int HASHMLDSA_verify_init(const HASHMLDSA_CTX *ctx,
+                          EVP_PKEY *public_key,
+                          HASHMLDSA *data);
+int HASHMLDSA_verify_update(const HASHMLDSA_CTX *ctx,
+                            HASHMLDSA *data,
+                            const unsigned char* message_fragment,
+                            size_t message_fragment_len);
+int HASHMLDSA_verify_final(const HASHMLDSA_CTX *ctx,
+                           HASHMLDSA *data,
+                           unsigned char *signature,
+                           size_t signature_len);

@@ -9,7 +9,7 @@ Allocates memory for a new HASHMLDSA context structure and initializes its field
 
 **Parameters**:
 
-- *lib_ctx*: An openssl Library context. NULL is not valid. If this library context doesn't have the default provider loaded, it will be loaded into this context.
+- *lib_ctx*: An openssl library context. NULL is not valid. The library context must have the default provider loaded otherwise it's not valid.
 - *sig_alg_name*: The required signature algorithm.
 
 **Returns**:
@@ -26,7 +26,7 @@ Allocates memory for a new HASHMLDSA context structure and initializes its field
 
 **Parameters**:
 
-- *lib_ctx*: An openssl Library context. NULL is not valid. If this library context doesn't have the default provider loaded, it will be loaded into this context.
+- *lib_ctx*: An openssl library context. NULL is not valid. The library context must have the default provider loaded otherwise it's not valid.
 - *sig_alg_name*: The required signature algorithm.
 
 **Returns**:
@@ -48,7 +48,7 @@ Explicitly set the message digest name if the default value is not suitable. You
 - *hash_len*: The byte length of the hash when specifying a XOF digest. it's ignored otherwise.
 
 **Returns**:
-1 on success, 0 on failure if the digest (and optionally the length) is not strong enough for the signature algorithm selected
+1 on success, 0 on failure if the digest (and optionally the length) is not strong enough for the signature algorithm selected.
 
 ---
 
@@ -82,7 +82,7 @@ A pointer to the newly allocated HASHMLDSA structure on success, NULL on failure
 ---
 
 ```c
-void HASHMLDSA_free(HASHMLDSA *input_data)
+void HASHMLDSA_free(HASHMLDSA *data)
 ```
 
 **Description**:
@@ -90,12 +90,12 @@ This function frees the memory allocated for the HASHMLDSA structure. Passing in
 
 **Parameters**:
 
-- *input_data*: Pointer to HASHMLDSA structure to be freed.
+- *data*: Pointer to HASHMLDSA structure to be freed.
 
 ---
 
 ```c
-int HASHMLDSA_set_context_string(HASHMLDSA *input_data, const unsigned char* context_string, size_t context_string_len)
+int HASHMLDSA_set_context_string(HASHMLDSA *data, const unsigned char* context_string, size_t context_string_len)
 ```
 
 **Description**:
@@ -103,17 +103,17 @@ set's the context string and the length of this context string in the HASHMLDSA 
 
 **Parameters**:
 
-- *input_data*: A pointer to HASHMLDSA structure.
+- *data*: A pointer to HASHMLDSA structure.
 - *context_string_string*: A pointer to the byte array containing the context string.
 - *context_string_string_len*: The length of the context string. Maximum length is 255.
 
 **Returns**:
-1 on success, 0 on failure if context is too large or if input_data is NULL.
+1 on success, 0 on failure if context is too large or if data is NULL.
 
 ---
 
 ```c
-int HASHMLDSA_set_message(HASHMLDSA *input_data, const unsigned char* message, size_t message_len)
+int HASHMLDSA_set_message(HASHMLDSA *data, const unsigned char* message, size_t message_len)
 ```
 
 **Description**:
@@ -121,17 +121,17 @@ set's the message and the length of this message in the HASHMLDSA structure for 
 
 **Parameters**:
 
-- *input_data*: A pointer to HASHMLDSA structure.
+- *data*: A pointer to HASHMLDSA structure.
 - *message*: A pointer to the message data.
 - *message_len*: The length of the message.
 
 **Returns**:
-1 on success, 0 on failure if input_data is NULL.
+1 on success, 0 on failure if data is NULL.
 
 ---
 
 ```c
-int HASHMLDSA_set_hashed_message(HASHMLDSA *input_data, const unsigned char* hashed_message, size_t hashed_message_len)
+int HASHMLDSA_set_hashed_message(HASHMLDSA *data, const unsigned char* hashed_message, size_t hashed_message_len)
 ```
 
 **Description**:
@@ -139,17 +139,17 @@ Set a previously hashed message and it's length. This provides the ability to se
 
 **Parameters**:
 
-- *input_data*: A pointer to HASHMLDSA structure.
+- *data*: A pointer to HASHMLDSA structure.
 - *hashed_message*: A pointer to the hashed message.
 - *hashed_message_len*: The length of the hashed message.
 
 **Returns**:
-1 on success, 0 on failure if input_data is NULL.
+1 on success, 0 on failure if data is NULL.
 
 ---
 
 ```c
-int HASHMLDSA_override_message_digest(HASHMLDSA *input_data, const char* digest_name, size_t hash_len)
+int HASHMLDSA_override_message_digest(HASHMLDSA *data, const char* digest_name, size_t hash_len)
 ```
 
 **Description**:
@@ -157,7 +157,7 @@ Explicitly override the message digest if the value inherited from the context i
 
 **Parameters**:
 
-- *input_data*: A pointer to HASHMLDSA structure.
+- *data*: A pointer to HASHMLDSA structure.
 - *digest_name*: The name of the digest (e.g., "SHA2-256").
 - *hash_len*: The byte length of the hash when specifying a XOF digest. it's ignored otherwise.
 
@@ -189,16 +189,16 @@ Clear last error recorded. If there was an error recorded then the memory is fre
 ---
 
 ```c
-int HASHMLDSA_generate_hashed_message(const HASHMLDSA_CTX *ctx, const HASHMLDSA *input_data, unsigned char *hashed_message, size_t *hashed_message_len)
+int HASHMLDSA_generate_hashed_message(const HASHMLDSA_CTX *ctx, const HASHMLDSA *data, unsigned char *hashed_message, size_t *hashed_message_len)
 ```
 
 **Description**:
-Pre hash the message ready for signing or verifying. This is useful when needing to do the sign or verification separately.
+Pre hash the message ready for signing or verifying. This is useful when needing to do the sign or verification separately. This performs a full init/update/final in one call.
 
 **Parameters**:
 
 - *ctx*: Pointer to HASHMLDSA context.
-- *input_data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters, message and context or pre-hashed message.
 - *hashed_message*: Pointer to buffer where the pre-hashed message will be stored.
 - *hashed_message_len*: Pointer to size_t variable that will hold the length of the pre-hashed message.
 
@@ -208,17 +208,73 @@ Pre hash the message ready for signing or verifying. This is useful when needing
 ---
 
 ```c
-int HASHMLDSA_sign(const HASHMLDSA_CTX *ctx, EVP_PKEY *priv_key, const HASHMLDSA *input_data, unsigned char *signature, size_t *signature_len)
+int HASHMLDSA_generate_hashed_message_init(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, size_t *hashed_message_len)
 ```
 
 **Description**:
-This will sign a message creating the hash first or using a previously hashed message using the provided private key. You can use this call to determine the size of the signature without performing a sign by passing NULL for all parameters except the context and a point to the signature length
+initialise in preparation to generate a pre-hash of a message.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *hashed_message_len*: Pointer to size_t variable that will hold the length of the final pre-hashed message.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_generate_hashed_message_update(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, const unsigned char* message_fragment, size_t message_fragment_len)
+```
+
+**Description**:
+Add a message fragment to the current set of message fragments. This can be called multiple times to build up the message to be pre-hashed.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *message_fragment*: The message fragment.
+- *hashed_message_len*: The size of the message fragment.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_generate_hashed_message_final(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, unsigned char *hashed_message, size_t *hashed_message_len)
+```
+
+**Description**:
+Perform the actual pre-hash on the collection of message fragments provided through the HASHMLDSA_generate_hashed_message_final API.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *hashed_message*: Pointer to buffer where the pre-hashed message will be stored.
+- *hashed_message_len*: Pointer to size_t variable that will hold the length of the pre-hashed message.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_sign(const HASHMLDSA_CTX *ctx, EVP_PKEY *priv_key, const HASHMLDSA *data, unsigned char *signature, size_t *signature_len)
+```
+
+**Description**:
+This will sign a message creating the hash first or using a previously hashed message using the provided private key. You can use this call to determine the size of the signature without performing a sign by passing NULL for all parameters except the context and a point to the signature length. This performs the action of an init/update/final in a single API call but also allows support for providing an already pre-hashed message.
 
 **Parameters**:
 
 - *ctx*: Pointer to HASHMLDSA context.
 - *priv_key*: The private key for signing.
-- *input_data*: Pointer to HASHMLDSA_Params structure containing the message and digest information or hashed message.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters, message and context or pre-hashed message.
 - *signature*: The buffer to store the generated signature.
 - *signature_len*: Pointer to the size of the signature buffer. If NULL is passed for the signature this will contain the length required for the signature.
 
@@ -228,7 +284,84 @@ This will sign a message creating the hash first or using a previously hashed me
 ---
 
 ```c
-int HASHMLDSA_verify(const HASHMLDSA_CTX *ctx, EVP_PKEY *public_key, const HASHMLDSA *input_data, const unsigned char *signature, size_t signature_len)
+int HASHMLDSA_sign_init(const HASHMLDSA_CTX *ctx, EVP_PKEY *priv_key, HASHMLDSA *data, size_t *signature_len)
+```
+
+**Description**:
+This will prepare to sign a message provided though one or more calls to HASHMLDSA_sign_init. This API will return the size of the signature that will be created as it is not dependent on the length of the message.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *priv_key*: The private key for signing.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *signature_len*: Pointer to the size of the signature buffer. If NULL is passed for the signature this will contain the length required for the signature.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_sign_update(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, const unsigned char* message_fragment, size_t message_fragment_len)
+```
+
+**Description**:
+Add a message fragment to the current set of message fragments. This can be called multiple times to build up the message to be pre-hashed and signed.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *message_fragment*: The message fragment.
+- *hashed_message_len*: The size of the message fragment.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_sign_final(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, unsigned char *signature, size_t *signature_len)
+```
+
+**Description**:
+This will pre-hash and sign the complete message using the private key provided via HASHMLDSA_sign_init. Note The final message is not stored in the data object.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *signature*: The buffer to store the generated signature.
+- *signature_len*: Pointer to the size of the signature buffer.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_verify(const HASHMLDSA_CTX *ctx, EVP_PKEY *public_key, const HASHMLDSA *data, const unsigned char *signature, size_t signature_len)
+```
+
+**Description**:
+This will verify a message creating the hash first or using a previously hashed message using the provided public key. This performs the action of an init/update/final in a single API call but also allows support for providing an already pre-hashed message.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *public_key*: The public key for verifying.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters, message and context or pre-hashed message.
+- *signature*: The signature to verify.
+- *signature_len*: The size of the signature buffer.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_verify_init(const HASHMLDSA_CTX *ctx, EVP_PKEY *public_key, HASHMLDSA *data)
 ```
 
 **Description**:
@@ -238,9 +371,45 @@ This will verify a message creating the hash first or using a previously hashed 
 
 - *ctx*: Pointer to HASHMLDSA context.
 - *public_key*: The public key for verifying.
-- *input_data*: Pointer to HASHMLDSA structure containing the message or hashed message.
-- *signature*: The signature to verify.
-- *signature_len*: The size of the signature buffer.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_verify_update(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, const unsigned char* message_fragment,
+```
+
+**Description**:
+Add a message fragment to the current set of message fragments. This can be called multiple times to build up the message to be pre-hashed and verified.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+- *message_fragment*: The message fragment.
+- *hashed_message_len*: The size of the message fragment.
+
+**Returns**:
+1 on success, 0 on failure.
+
+---
+
+```c
+int HASHMLDSA_verify_final(const HASHMLDSA_CTX *ctx, HASHMLDSA *data, unsigned char *signature,
+```
+
+**Description**:
+This will pre-hash and verify the complete message using the provided signature and public key provided via HASHMLDSA_sign_init. Note The final message is not stored in the data object.
+
+**Parameters**:
+
+- *ctx*: Pointer to HASHMLDSA context.
+- *data*: Pointer to HASHMLDSA_Params structure containing the context and digest information.
+- *signature*: The buffer to store the generated signature.
+- *signature_len*: Pointer to the size of the signature buffer.
 
 **Returns**:
 1 on success, 0 on failure.

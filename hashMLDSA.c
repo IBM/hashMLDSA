@@ -50,7 +50,7 @@ limitations under the License.
 
 /*
  * alternative to set_error_message(format, ...)
- * where x could be context or input_data
+ * where x could be context or data
  */
 #define debug_output_error(x, format, ...) \
     do { \
@@ -135,51 +135,64 @@ struct hashMLDSA {
     const unsigned char* message;
     size_t message_len;
 
+    /* cache the hashed message length for later verification for generate_hashed_message_final */
+    size_t calculated_hashed_message_len;
+
+    /* cache the signing or verifying key context created in sign_init for later use in sign_final */
+    EVP_PKEY_CTX *key_ctx;
+
+    /* flag to indicate test mode (eg deterministic signatures) */
     unsigned int test_mode;
 
     /* copy of message digest information from the context */
     struct hashMLDSA_digest digest;
 };
 
+/* TODO: Add file and line number to the error message */
 static void set_error_message(const char *format, ...)
 {
     va_list args;
+    char* new_msg = NULL;
 
     va_start(args, format);
     size_t required_size = vsnprintf(NULL, 0, format, args) + 1;
     va_end(args);
 
-    error_message = realloc(error_message, required_size);
-    if (!error_message)
+    new_msg = realloc(error_message, required_size);
+    if (!new_msg) {
+        free(error_message);
+        error_message = NULL;
         return;
+    }
 
+    error_message = new_msg;
     va_start(args, format);
     vsnprintf(error_message, required_size, format, args);
     error_message[required_size - 1] = '\0';
     va_end(args);
 }
 
-static int check_default_provider(HASHMLDSA_CTX *ctx)
-{
-    if (OSSL_PROVIDER_available(ctx->lib_ctx, "default") == 0) {
-       set_error_message("default provider not loaded into openssl library context");
-       goto error;
-    }
+// static int check_default_provider(HASHMLDSA_CTX *ctx)
+// {
+//     if (OSSL_PROVIDER_available(ctx->lib_ctx, "default") == 0) {
+//        set_error_message("default provider not loaded into openssl library context");
+//        goto error;
+//     }
 
-    return SUCCESS;
+//     return SUCCESS;
 
-error:
-    return FAILURE;
-}
+// error:
+//     return FAILURE;
+// }
 
-static int dump_oid(unsigned char *oid, size_t oid_len) {
-    fprintf(stderr, "OID[]={");
-    for (int i = 0; i < oid_len; i++) {
-        fprintf(stderr, "0x%02X", oid[i]);
-        if (i < oid_len - 1) fprintf(stderr, ", ");
-    }
-    fprintf(stderr, "};\n");
-}
+// static int dump_oid(unsigned char *oid, size_t oid_len) {
+//     fprintf(stderr, "OID[]={");
+//     for (int i = 0; i < oid_len; i++) {
+//         fprintf(stderr, "0x%02X", oid[i]);
+//         if (i < oid_len - 1) fprintf(stderr, ", ");
+//     }
+//     fprintf(stderr, "};\n");
+// }
 
 static int get_md_oid(const EVP_MD *md, unsigned char *oid, size_t *oid_len) {
     int nid, len;
@@ -227,6 +240,12 @@ static size_t get_hash_length(const struct hashMLDSA_digest *digest,
     size_t oid_start;
     size_t hash_len = 0;
 
+    /* Minimum valid hashed message: 1 (domain) + 1 (context_len) + 0 (context) + 2 (OID header) + 1 (OID) + 1 (hash) = 6 bytes */    
+    if (hashed_message_len < 6) {
+        set_error_message("Hashed message is too short (minimum of 6 bytes required)");
+        goto exit;  
+    }
+
     /* break down the hashed message to validate it and also get the length of the hash itself */
     if (hashed_message[0] != 0x01) {
         set_error_message("Hashed message does not start with the correct domain identifier");
@@ -243,7 +262,12 @@ static size_t get_hash_length(const struct hashMLDSA_digest *digest,
         goto exit;
     }
 
-    if (memcmp(&hashed_message[oid_start], digest->oid, digest->oid_len) != 0) {
+    if (oid_start + digest->oid_len > hashed_message_len) {
+        set_error_message("Hashed message is too short for OID comparison");
+        goto exit;
+    }
+
+    if (CRYPTO_memcmp(&hashed_message[oid_start], digest->oid, digest->oid_len) != 0) {
         set_error_message("Hashed message has not been hashed using the expected digest of %s", digest->digest_name);
         goto exit;
     }
@@ -270,11 +294,70 @@ exit:
 
 }
 
+static int build_hashed_message(const HASHMLDSA *data,
+                                unsigned char* hash,
+                                unsigned char **p_hashed_message,
+                                size_t *hashed_message_len)
+{
+
+    const struct hashMLDSA_digest *digest = NULL;
+    unsigned char* hashed_message;
+    size_t calculated_hashed_message_len = 0;
+    digest = &data->digest;
+
+    /*
+     * We assemble the RAW hashed message with hashed message format:
+     * 0x01 || len(context string) || DER encoding of OID || MD(message)
+     * check for overflow first to be safe
+     */
+    if (data->context_string_len > SIZE_MAX - 2 - digest->oid_len - digest->digest_hash_len) {
+        set_error_message("Hashed message length calculation would overflow");
+        goto error;
+    }
+
+    calculated_hashed_message_len = 1 + 1 + data->context_string_len + digest->oid_len + digest->digest_hash_len;
+    if (*p_hashed_message == NULL) {
+        *p_hashed_message = OPENSSL_zalloc(calculated_hashed_message_len);
+        if (*p_hashed_message == NULL) {
+            set_error_message("Unable to allocate memory to store the hashed message");
+            return FAILURE;
+        }
+    }
+
+    hashed_message = *p_hashed_message;
+
+    hashed_message[0] = 0x01;
+    hashed_message[1] = (unsigned char)data->context_string_len;
+    memcpy(&(hashed_message[2]), data->context_string, data->context_string_len);
+    memcpy(&(hashed_message[2 + data->context_string_len]), digest->oid, digest->oid_len);
+    memcpy(&(hashed_message[2 + data->context_string_len + digest->oid_len]), hash, digest->digest_hash_len);
+
+    if (hashed_message_len != NULL)
+        *hashed_message_len = calculated_hashed_message_len;
+
+    return SUCCESS;
+
+error:
+    return FAILURE;
+}
+
+static void clear_hash_memory(const HASHMLDSA *data, 
+                              unsigned char *hash)
+{
+
+    const struct hashMLDSA_digest *digest = NULL;
+    if (hash == NULL)
+        return;
+
+    digest = &data->digest;
+    OPENSSL_clear_free(hash, digest->digest_hash_len);
+}
+
 /*
  * creates a Hashed Message. This method performs no check to see if both a hashed message and details of the message to
  * be hashed have been provided. It just looks at the information provided and returns the hashed message
  */
-static int create_hashed_message(const HASHMLDSA *input_data,
+static int create_hashed_message(const HASHMLDSA *data,
                                  unsigned char *hashed_message,
                                  size_t *hashed_message_len)
 
@@ -283,13 +366,13 @@ static int create_hashed_message(const HASHMLDSA *input_data,
     unsigned char *hash = NULL;
     size_t calculated_hashed_message_len = 0;
 
-    if (input_data == NULL) {
+    if (data == NULL) {
         set_error_message("No HASHMLDSA data provided");
         goto error;
     }
 
-    /* Need to check this in case a blank input_data object is given */
-    if (input_data->message == NULL || input_data->message_len == 0) {
+    /* Need to check this in case a blank data object is given */
+    if (data->message == NULL || data->message_len == 0) {
         set_error_message("Message cannot be NULL or empty");
         goto error;
     }
@@ -299,10 +382,15 @@ static int create_hashed_message(const HASHMLDSA *input_data,
         goto error;
     }
 
-    digest = &input_data->digest;
+    digest = &data->digest;
 
     /* calculate the length of the hashed message */
-    calculated_hashed_message_len = 1 + 1 + input_data->context_string_len + digest->oid_len + digest->digest_hash_len;
+    if (data->context_string_len > SIZE_MAX - 2 - digest->oid_len - digest->digest_hash_len) {
+        set_error_message("Hashed message length calculation would overflow");
+        goto error;
+    }
+
+    calculated_hashed_message_len = 1 + 1 + data->context_string_len + digest->oid_len + digest->digest_hash_len;
     if (hashed_message == NULL) {
         *hashed_message_len = calculated_hashed_message_len;
         goto success;
@@ -326,7 +414,7 @@ static int create_hashed_message(const HASHMLDSA *input_data,
             goto error;
         }
 
-        if (EVP_DigestUpdate(digest->mdctx, input_data->message, input_data->message_len) <= 0) {
+        if (EVP_DigestUpdate(digest->mdctx, data->message, data->message_len) <= 0) {
             set_error_message("Failed to update XOF digest: %s", ERR_error_string(ERR_get_error(), NULL));
             goto error;
         }
@@ -336,36 +424,30 @@ static int create_hashed_message(const HASHMLDSA *input_data,
             goto error;
         }
     } else {
-        if (EVP_Digest(input_data->message, input_data->message_len, hash, NULL, digest->md, NULL) <= 0) {
+        /* Use a single shot for digest calculation as it is assumed to be quicker */
+        if (EVP_Digest(data->message, data->message_len, hash, NULL, digest->md, NULL) <= 0) {
             set_error_message("Hash failed with error: %s", ERR_error_string(ERR_get_error(), NULL));
             goto error;
         }
     }
 
-    /*
-     * We assemble the RAW hashed message with hashed message format:
-     * 0x01 || len(context string) || DER encoding of OID || MD(message)
-     */
-    hashed_message[0] = 0x01;
-    hashed_message[1] = (char)input_data->context_string_len;
-    memcpy(&(hashed_message[2]), input_data->context_string, input_data->context_string_len);
-    memcpy(&(hashed_message[2 + input_data->context_string_len]), digest->oid, digest->oid_len);
-    memcpy(&(hashed_message[2 + input_data->context_string_len + digest->oid_len]), hash, digest->digest_hash_len);
-    *hashed_message_len = calculated_hashed_message_len;
+    if (!build_hashed_message(data, hash, &hashed_message, hashed_message_len))
+        goto error;
+
 
 success:
-    OPENSSL_free(hash);
+    OPENSSL_clear_free(hash, digest->digest_hash_len);
     return SUCCESS;
 
 error:
-    OPENSSL_free(hash);
+    OPENSSL_clear_free(hash, digest->digest_hash_len);
     return FAILURE;
 }
 
 /*
- * Initialise the digest information in the input_data from the context
+ * Initialise the digest information in the HASHMLDSA data from the context
  */
-static int init_message_digest(const HASHMLDSA_CTX *ctx, HASHMLDSA *input_data)
+static int init_message_digest(const HASHMLDSA_CTX *ctx, HASHMLDSA *data)
 {
     /*
      * if we did a pure shallow copy of the message digest information it
@@ -373,47 +455,47 @@ static int init_message_digest(const HASHMLDSA_CTX *ctx, HASHMLDSA *input_data)
      * who knows, so we will do a complete copy and free up at the end
      * only if we override will we replace the information.
     */
-    input_data->digest.oid = malloc(ctx->digest.oid_len);
-    if (!input_data->digest.oid) {
+    data->digest.oid = malloc(ctx->digest.oid_len);
+    if (!data->digest.oid) {
         set_error_message("Failed to allocate memory to store message digest information");
         return FAILURE;
     }
-    memcpy(input_data->digest.oid, ctx->digest.oid, ctx->digest.oid_len);
-    input_data->digest.oid_len = ctx->digest.oid_len;
-    input_data->digest.digest_hash_len = ctx->digest.digest_hash_len;
-    input_data->digest.digest_name = ctx->digest.digest_name;
-    input_data->digest.md = ctx->digest.md;
-    input_data->digest.is_xof = ctx->digest.is_xof;
-    input_data->digest.min_allowed_digest_hash_len = ctx->digest.min_allowed_digest_hash_len;
+    memcpy(data->digest.oid, ctx->digest.oid, ctx->digest.oid_len);
+    data->digest.oid_len = ctx->digest.oid_len;
+    data->digest.digest_hash_len = ctx->digest.digest_hash_len;
+    data->digest.digest_name = ctx->digest.digest_name;
+    data->digest.md = ctx->digest.md;
+    data->digest.is_xof = ctx->digest.is_xof;
+    data->digest.min_allowed_digest_hash_len = ctx->digest.min_allowed_digest_hash_len;
 
-    /* allocate an ND CTX if this is xof */
-    if (input_data->digest.is_xof) {
-        input_data->digest.mdctx = EVP_MD_CTX_new();
-        if (input_data->digest.mdctx == NULL) {
-            set_error_message("Failed to create context for XOF digest");
-            goto error;
-        }
-    } else
-        input_data->digest.mdctx = NULL; /* ensure this is set to NULL to indicate it's not defined */
+    data->digest.mdctx = EVP_MD_CTX_new();
+    if (data->digest.mdctx == NULL) {
+        set_error_message("Failed to create message digest context");
+        goto error;
+    }
     return SUCCESS;
 
 error:
-    free(input_data->digest.oid);
-    input_data->digest.oid = NULL;
+    free(data->digest.oid);
+    data->digest.oid = NULL;
     return FAILURE;
 }
 
 static void free_digest(struct hashMLDSA_digest *digest) {
-    if (digest->oid != NULL)
+    if (digest->oid != NULL) {
         free(digest->oid);
+        digest->oid = NULL;
+    }
 
-    if (digest->mdctx != NULL)
+    if (digest->mdctx != NULL) {
         EVP_MD_CTX_free(digest->mdctx);
+        digest->mdctx = NULL;
+    }
 }
 
 /*
  * add or replace the digest information
- * as we don't know if this is called by the context or the input_data we can't create an MD CTX here
+ * as we don't know if this is called by the context or the HASHMLDSA data we can't create an MD CTX here
  */
 static int replace_digest(struct hashMLDSA_digest *digest, const char *digest_name, size_t hash_len)
 {
@@ -423,10 +505,16 @@ static int replace_digest(struct hashMLDSA_digest *digest, const char *digest_na
     EVP_MD_CTX *mdctx = NULL;
     unsigned char *oid = NULL;
     size_t oid_len;
+    size_t digest_len;
     int is_xof = 0;
 
-    if (digest_name == NULL || strnlen(digest_name, 20) == 0) {
-        set_error_message("NULL or Empty digest name");
+    if (digest_name == NULL) {
+        set_error_message("NULL digest name");
+        goto error;
+    }
+    digest_len = strnlen(digest_name, 20);
+    if (digest_len == 0 || digest_len == 20) {
+        set_error_message("Empty digest name or non valid digest name");
         goto error;
     }
 
@@ -491,6 +579,11 @@ static int replace_digest(struct hashMLDSA_digest *digest, const char *digest_na
     digest->oid_len = oid_len;
     digest->digest_name = normalised_digest_name;
     digest->digest_hash_len = digest_hash_len;
+    digest->mdctx = EVP_MD_CTX_new();
+    if (digest->mdctx == NULL) {
+        set_error_message("Failed to create message digest context");
+        goto error;
+    }
 
     return SUCCESS;
 
@@ -502,6 +595,214 @@ error:
 
     return FAILURE;
 }
+
+/*
+ * validate the context and data passed into the external APIs
+ */
+static int validate_ctx_and_data(const HASHMLDSA_CTX *ctx,
+                                 const HASHMLDSA *data)
+{
+    if (ctx == NULL) {
+        set_error_message("No Context provided");
+        return FAILURE;
+    }
+
+    if (data == NULL) {
+        set_error_message("No HASHMLDSA data provided");
+        return FAILURE;
+    }
+
+    if (ctx->id != data->id) {
+        set_error_message("the input data of HASHMDLSA is not compatible with the context of HASHMLDSA_CTX");
+        return FAILURE;
+    }
+
+    return SUCCESS;
+
+}
+
+/*
+ * validate the provided key and create a key context
+ */
+static int validate_and_create_key_context(const HASHMLDSA_CTX *ctx,
+                                           EVP_PKEY *p_key,
+                                           EVP_PKEY_CTX **key_ctx)
+{
+    if (p_key == NULL) {
+        set_error_message("No Key provided");
+        goto error;
+    }
+
+    if (!EVP_PKEY_is_a(p_key, ctx->sig_alg_name)) {
+        set_error_message("Key is not of the expected type for signing as %s", ctx->sig_alg_name);
+        goto error;
+    }
+
+    *key_ctx = EVP_PKEY_CTX_new_from_pkey(ctx->lib_ctx, p_key, NULL);
+    if (*key_ctx == NULL) {
+        set_error_message("Failure in preparing key context from key; %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+    return SUCCESS;
+
+error:
+    return FAILURE;
+}
+
+/*
+ * perform validation and initialise the digest for _init API calls
+ */
+static int validate_and_digest_init(const HASHMLDSA_CTX *ctx,
+                                    EVP_PKEY *p_key,
+                                    HASHMLDSA *data)
+{
+    struct hashMLDSA_digest *digest = NULL;
+
+    if (!validate_ctx_and_data(ctx, data))
+        return FAILURE;
+
+    digest = &data->digest;
+
+    if (!validate_and_create_key_context(ctx, p_key, &data->key_ctx))
+        goto error;
+
+    if (EVP_DigestInit_ex(digest->mdctx, digest->md, NULL) <= 0) {
+        set_error_message("Failed to initialize digest: %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+
+    return SUCCESS;
+
+error:
+    if (data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+
+    return FAILURE;
+}
+
+/*
+ * perform validation and update the digest for _update API calls
+ */
+static int validate_and_digest_update(const HASHMLDSA_CTX *ctx,
+                              const HASHMLDSA *data,
+                              const unsigned char* message_fragment,
+                              size_t message_fragment_len)
+{
+    const struct hashMLDSA_digest *digest = NULL;
+
+    if (!validate_ctx_and_data(ctx, data))
+       return FAILURE;
+
+    digest = &data->digest;
+
+    if (message_fragment == NULL || message_fragment_len == 0) {
+        set_error_message("No message fragment or fragment length is zero");
+        goto error;
+    }
+
+    if (EVP_DigestUpdate(digest->mdctx, message_fragment, message_fragment_len) <= 0) {
+        set_error_message("Failed to update digest: %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+
+    return SUCCESS;
+
+error:
+    return FAILURE;
+}
+
+/*
+ * perform validation and finalise the digest for _final API calls
+ */
+static int digest_final(const HASHMLDSA *data,
+                        unsigned char **p_hash)
+{
+    const struct hashMLDSA_digest *digest = NULL;
+
+    digest = &data->digest;
+
+    *p_hash = OPENSSL_zalloc(digest->digest_hash_len);
+    if (*p_hash == NULL) {
+        set_error_message("Failed to allocate memory for hash");
+        goto error;
+    }
+
+    if (digest->is_xof) {
+        if (EVP_DigestFinalXOF(digest->mdctx, *p_hash, digest->digest_hash_len) <= 0) {
+            set_error_message("Failed to finalise XOF digest: %s", ERR_error_string(ERR_get_error(), NULL));
+            goto error;
+        }
+    } else {
+        if (EVP_DigestFinal_ex(digest->mdctx, *p_hash, NULL) <= 0) {
+            set_error_message("Failed to finalise XOF digest: %s", ERR_error_string(ERR_get_error(), NULL));
+            goto error;
+        }
+    }
+
+    return SUCCESS;
+
+error:
+    if (*p_hash)
+        OPENSSL_clear_free(*p_hash, digest->digest_hash_len);
+
+    return FAILURE;
+}
+
+/*
+* validate the message or hashed message in the data and create a hashed message if required
+*/
+static int validate_and_hash_message_if_needed(const HASHMLDSA *data,
+                                               unsigned char **p_hashed_message,
+                                               size_t *p_hashed_message_len)
+{
+    const struct hashMLDSA_digest *digest;
+    unsigned char* generated_hash_message = NULL;
+    size_t hashed_message_len;
+
+    digest = &data->digest;
+
+    if ((data->hashed_message == NULL || data->hashed_message_len == 0) && (data->message == NULL || data->message_len == 0)) {
+        set_error_message("No message or hash message");
+        goto error;
+    }
+
+    if (data->hashed_message == NULL || data->hashed_message_len == 0) {
+        /* we create the hashed message from the data object */
+        /* determine length of hashed_message */
+        if (create_hashed_message(data, NULL, &hashed_message_len) <= 0)
+            goto error;
+
+        generated_hash_message = OPENSSL_zalloc(hashed_message_len);
+        if (!generated_hash_message) {
+            set_error_message("Failed to allocate memory for hashed_message");
+            goto error;
+        }
+
+        /* generate the hashed message */
+        if (create_hashed_message(data, generated_hash_message, &hashed_message_len) <= 0)
+            goto error;
+        *p_hashed_message = generated_hash_message;
+        *p_hashed_message_len = hashed_message_len;
+    } else {
+        /* We just use the hashed message stored in the data object */
+        if (get_hash_length(digest, data->hashed_message, data->hashed_message_len) == 0)
+            goto error;
+
+        *p_hashed_message = (unsigned char*)data->hashed_message;
+        *p_hashed_message_len = data->hashed_message_len;
+    }
+
+    return SUCCESS;
+
+error:
+    if (generated_hash_message)
+        OPENSSL_clear_free(generated_hash_message, hashed_message_len);
+
+    return FAILURE;
+}
+
 
 /*
  * get the signature details for the context and assign a default digest
@@ -534,14 +835,8 @@ error:
 static HASHMLDSA_CTX *HASHMLDSA_CTX_new_internal(OSSL_LIB_CTX *lib_ctx, const char *sig_alg_name, int test_mode)
 {
     HASHMLDSA_CTX *ctx = NULL;
-    int i = 0;
 
     if (lib_ctx == NULL) {
-        // TODO: Do we want to load the global default here or expect the client app to do it
-        // We can't replicate OpenSSL here as we can't get access to the thread local storage
-        // which it can for stored library contexts so maybe better we don't do anything with NULL
-        // lib_ctx = OSSL_LIB_CTX_get0_global_default();
-        // if (lib_ctx == NULL) { // output an error }
         set_error_message("Library context cannot be NULL");
         return NULL;
     }
@@ -551,16 +846,15 @@ static HASHMLDSA_CTX *HASHMLDSA_CTX_new_internal(OSSL_LIB_CTX *lib_ctx, const ch
        return NULL;
     }
 
+    if (sig_alg_name == NULL || strlen(sig_alg_name) == 0) {
+        set_error_message("signature algorithm is NULL or empty");
+        goto error;
+    }
+
     if ((ctx = OPENSSL_zalloc(sizeof(*ctx))) == NULL) {
         set_error_message("Failed to allocate memory for context");
         return NULL;
     }
-
-    if (sig_alg_name == NULL || strlen(sig_alg_name) == 0) {
-        set_error_message("signature algorithm is NULL or empty", sig_alg_name);
-        goto error;
-    }
-
     ctx->lib_ctx = lib_ctx;
     ctx->test_mode = test_mode;
     ctx->sig_alg_name = sig_alg_name;
@@ -590,13 +884,18 @@ static HASHMLDSA_CTX *HASHMLDSA_CTX_new_internal(OSSL_LIB_CTX *lib_ctx, const ch
     return ctx;
 
 error:
-    if (ctx->sig_alg)
+    if (ctx && ctx->sig_alg)
         EVP_SIGNATURE_free(ctx->sig_alg);
 
-    OPENSSL_free(ctx);
+    if (ctx)
+        OPENSSL_free(ctx);
     return NULL;
 
 }
+
+/*
+ * Start of official API calls
+ */
 
 /**
  * HASHMLDSA_CTX_new - Allocate and initialize a new HASHMLDSA context.
@@ -619,7 +918,7 @@ HASHMLDSA_CTX *HASHMLDSA_CTX_new(OSSL_LIB_CTX *lib_ctx, const char *sig_alg_name
 }
 
 /**
- * HASHMLDSA_CTX_new_for_test - Allocate and initialize a new HASHMLDSA context for testing purposes
+ * HASHMLDSA_CTX_new_for_test - Allocate and initialize a new HASHMLDSA context for testing purposes.
  *
  * @desc: Allocates memory for a new HASHMLDSA context structure and initializes its fields.
  * The only supported algorithms are ML-DSA-44, ML-DSA-65 or ML-DSA-87. Alternative names such as
@@ -640,7 +939,7 @@ HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(OSSL_LIB_CTX *lib_ctx, const char* sig
 }
 
 /**
- * HASHMLDSA_CTX_set_message_digest - set a message digest parameters
+ * HASHMLDSA_CTX_set_message_digest - set a message digest parameters.
  *
  * @desc: Explicitly set the message digest name if the default value is not suitable.
  * You can specify a hash length if you specify a XOF digests such
@@ -659,7 +958,7 @@ HASHMLDSA_CTX *HASHMLDSA_CTX_new_for_test(OSSL_LIB_CTX *lib_ctx, const char* sig
  * @param digest_name The name of the digest (e.g., "SHA-256"). Supports same canonical names as OpenSSL.
  * @param hash_len The byte length of the hash when specifying a XOF digest. it's ignored otherwise.
  *
- * @returns: 1 on success, 0 on failure if the digest (and optionally the length) is not strong enough for the signature algorithm selected
+ * @returns: 1 on success, 0 on failure if the digest (and optionally the length) is not strong enough for the signature algorithm selected.
  */
 int HASHMLDSA_CTX_set_message_digest(HASHMLDSA_CTX *ctx, const char* digest_name, size_t hash_len)
 {
@@ -682,11 +981,15 @@ void HASHMLDSA_CTX_free(HASHMLDSA_CTX *ctx)
     if (ctx == NULL)
         return;
 
-    if (ctx->sig_alg != NULL)
+    if (ctx->sig_alg) {
         EVP_SIGNATURE_free(ctx->sig_alg);
+        ctx->sig_alg = NULL;
+    }
 
-    if (ctx->deflt != NULL)
+    if (ctx->deflt) {
         OSSL_PROVIDER_unload(ctx->deflt);
+        ctx->deflt = NULL;
+    }
 
     free_digest(&ctx->digest);
 
@@ -706,36 +1009,39 @@ void HASHMLDSA_CTX_free(HASHMLDSA_CTX *ctx)
  */
 HASHMLDSA *HASHMLDSA_new(const HASHMLDSA_CTX *ctx)
 {
-    HASHMLDSA *input_data;
+    HASHMLDSA *data;
 
     if (ctx == NULL) {
         set_error_message("Context is NULL");
         return NULL;
     }
 
-    if ((input_data = OPENSSL_zalloc(sizeof(*input_data))) == NULL) {
+    if ((data = OPENSSL_zalloc(sizeof(*data))) == NULL) {
         set_error_message("Failed to allocate memory");
         return NULL;
     }
 
     /* probably not required as we use zalloc, but better safe than sorry */
-    input_data->context_string = NULL;
-    input_data->context_string_len = 0;
-    input_data->hashed_message = NULL;
-    input_data->hashed_message_len = 0;
-    input_data->message = NULL;
-    input_data->message_len = 0;
+    data->context_string = NULL;
+    data->context_string_len = 0;
+    data->hashed_message = NULL;
+    data->hashed_message_len = 0;
+    data->message = NULL;
+    data->message_len = 0;
+    data->calculated_hashed_message_len = 0;
+    data->key_ctx = NULL;
 
-    if (init_message_digest(ctx, input_data) == FAILURE)
+    if (init_message_digest(ctx, data) == FAILURE)
         goto error;
 
-    input_data->id = ctx->id;
-    input_data->test_mode = ctx->test_mode;
-    return input_data;
+    data->id = ctx->id;
+    data->test_mode = ctx->test_mode;
+    return data;
 
 error:
-    free_digest(&input_data->digest);
-    OPENSSL_free(input_data);
+    if (&data->digest != NULL)
+        free_digest(&data->digest);
+    OPENSSL_free(data);
     return NULL;
 }
 
@@ -745,15 +1051,21 @@ error:
  * @desc: This function frees the memory allocated for the HASHMLDSA structure.
  * Passing in NULL results in a NO-OP.
  *
- * @param input_data Pointer to HASHMLDSA structure to be freed.
+ * @param data Pointer to HASHMLDSA structure to be freed.
  */
-void HASHMLDSA_free(HASHMLDSA *input_data)
+void HASHMLDSA_free(HASHMLDSA *data)
 {
-    if (input_data == NULL)
+    if (data == NULL)
         return;
 
-    free_digest(&input_data->digest);
-    OPENSSL_free(input_data);
+    free_digest(&data->digest);
+
+    if (data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+
+    OPENSSL_free(data);
 }
 
 /**
@@ -762,15 +1074,15 @@ void HASHMLDSA_free(HASHMLDSA *input_data)
  * @desc: set's the context string and the length of this context string in the HASHMLDSA structure for
  * use when creating the hashed message during sign or the createPreHash operations.
  *
- * @param input_data A pointer to HASHMLDSA structure.
+ * @param data A pointer to HASHMLDSA structure.
  * @param context_string_string A pointer to the byte array containing the context string.
  * @param context_string_string_len The length of the context string. Maximum length is 255.
  *
- * @returns: 1 on success, 0 on failure if context is too large or if input_data is NULL.
+ * @returns: 1 on success, 0 on failure if context is too large or if data is NULL.
  */
-int HASHMLDSA_set_context_string(HASHMLDSA *input_data, const unsigned char* context_string, size_t context_string_len)
+int HASHMLDSA_set_context_string(HASHMLDSA *data, const unsigned char* context_string, size_t context_string_len)
 {
-    if (!input_data)
+    if (!data)
         goto error;
 
     if (context_string_len > 255) {
@@ -783,8 +1095,8 @@ int HASHMLDSA_set_context_string(HASHMLDSA *input_data, const unsigned char* con
         goto error;
     }
 
-    input_data->context_string = context_string;
-    input_data->context_string_len = context_string_len;
+    data->context_string = context_string;
+    data->context_string_len = context_string_len;
 
     return SUCCESS;
 
@@ -793,7 +1105,7 @@ error:
 }
 
 /**
- * /**
+ *
  * HASHMLDSA_set_message - Set the message to be used to create the hashed message.
  *
  * @desc: set's the message and the length of this message in the HASHMLDSA structure for
@@ -802,15 +1114,15 @@ error:
  * example if set_message was invoked after set_hashed_message then the values for set_message
  * are used.
  *
- * @param input_data A pointer to HASHMLDSA structure.
+ * @param data A pointer to HASHMLDSA structure.
  * @param message A pointer to the message data.
  * @param message_len The length of the message.
  *
- * @returns: 1 on success, 0 on failure if input_data is NULL.
+ * @returns: 1 on success, 0 on failure if data is NULL.
  */
-int HASHMLDSA_set_message(HASHMLDSA *input_data, const unsigned char* message, size_t message_len)
+int HASHMLDSA_set_message(HASHMLDSA *data, const unsigned char* message, size_t message_len)
 {
-    if (!input_data)
+    if (!data)
         return FAILURE;
 
     if (message_len == 0) {
@@ -818,16 +1130,16 @@ int HASHMLDSA_set_message(HASHMLDSA *input_data, const unsigned char* message, s
         return FAILURE;
     }
 
-    input_data->message = message;
-    input_data->message_len = message_len;
-    input_data->hashed_message = NULL;
-    input_data->hashed_message_len = 0;
+    data->message = message;
+    data->message_len = message_len;
+    data->hashed_message = NULL;
+    data->hashed_message_len = 0;
 
     return SUCCESS;
 }
 
 /**
- * HASHMLDSA_set_hashed_message - set a previously hashed message
+ * HASHMLDSA_set_hashed_message - set a previously hashed message.
  *
  * @desc: Set a previously hashed message and it's length. This provides the ability to separate the sign or verify
  * into 2 distinct steps where the creation of the hash may have been done earlier or elsewhere (for example a different
@@ -835,35 +1147,37 @@ int HASHMLDSA_set_message(HASHMLDSA *input_data, const unsigned char* message, s
  * Message and Hashed Message are mutually exclusive. Whichever was set last is used, so for
  * example if set_hashed_message was invoked after set_message then the values for set_hashed_message
  * are used.
-
  *
- * @param input_data A pointer to HASHMLDSA structure.
+ *
+ * @param data A pointer to HASHMLDSA structure.
  * @param hashed_message A pointer to the hashed message.
  * @param hashed_message_len The length of the hashed message.
  *
- * @returns: 1 on success, 0 on failure if input_data is NULL.
+ * @returns: 1 on success, 0 on failure if data is NULL.
  */
-int HASHMLDSA_set_hashed_message(HASHMLDSA *input_data, const unsigned char* hashed_message, size_t hashed_message_len)
+int HASHMLDSA_set_hashed_message(HASHMLDSA *data, const unsigned char* hashed_message, size_t hashed_message_len)
 {
 
-    if (!input_data)
+    if (!data) {
+        set_error_message("No HASHMLDSA data provided");
         return FAILURE;
+    }
 
     if (hashed_message_len == 0) {
         set_error_message("Hashed Message cannot be of length 0");
         return FAILURE;
     }
 
-    input_data->hashed_message = hashed_message;
-    input_data->hashed_message_len = hashed_message_len;
-    input_data->message = NULL;
-    input_data->message_len = 0;
+    data->hashed_message = hashed_message;
+    data->hashed_message_len = hashed_message_len;
+    data->message = NULL;
+    data->message_len = 0;
 
     return SUCCESS;
 }
 
 /**
- * HASHMLDSA_override_message_digest - override message digest parameters inherited from the context
+ * HASHMLDSA_override_message_digest - override message digest parameters inherited from the context.
  *
  * @desc: Explicitly override the message digest if the value inherited from the context is not suitable.
  * You can specify a hash length if you specify a XOF digests such
@@ -876,29 +1190,20 @@ int HASHMLDSA_set_hashed_message(HASHMLDSA *input_data, const unsigned char* has
  * If you chose an XOF digest such as SHAKE128 or SHAKE256, specifying a hash_len of 0 will result in a default hash length
  * being allocated. The default is defined by OpenSSL itself and not by this library.
  *
- * @param input_data A pointer to HASHMLDSA structure.
+ * @param data A pointer to HASHMLDSA structure.
  * @param digest_name The name of the digest (e.g., "SHA2-256").
  * @param hash_len The byte length of the hash when specifying a XOF digest. it's ignored otherwise.
  *
  * @returns: 1 on success, 0 on failure.
  */
-int HASHMLDSA_override_message_digest(HASHMLDSA *input_data, const char* digest_name, size_t hash_len)
+int HASHMLDSA_override_message_digest(HASHMLDSA *data, const char* digest_name, size_t hash_len)
 {
 
-    if (!input_data)
+    if (!data)
         goto error;
 
-    if (replace_digest(&input_data->digest, digest_name, hash_len) == FAILURE) {
+    if (replace_digest(&data->digest, digest_name, hash_len) == FAILURE) {
         goto error;
-    }
-
-    /* if it's an XOF digest, create an MD CTX if not already created */
-    if (input_data->digest.is_xof && input_data->digest.mdctx == NULL) {
-        input_data->digest.mdctx = EVP_MD_CTX_new();
-        if (input_data->digest.mdctx == NULL) {
-            set_error_message("Failed to create context for XOF digest");
-            goto error;
-        }
     }
 
     return SUCCESS;
@@ -909,7 +1214,7 @@ error:
 }
 
 /**
- * HASHMLDSA_print_last_error - output the last error description
+ * HASHMLDSA_print_last_error - output the last error description.
  *
  * @desc: Output the last error recorded. Note that it is never cleared and further errors will overwrite the previous one.
  *
@@ -945,53 +1250,180 @@ void HASHMLDSA_clear_last_error()
 
 
 /**
- * HASHMLDSA_generate_hashed_message - pre hash a message for use with signing of verifying
+ * HASHMLDSA_generate_hashed_message - pre hash a message for use with signing of verifying.
  *
  * @desc: Pre hash the message ready for signing or verifying. This is useful when needing to do the sign or
- * verification separately.
+ * verification separately. This performs a full init/update/final in one call.
  *
  * @param ctx Pointer to HASHMLDSA context.
- * @param input_data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters, message and context or pre-hashed message.
  * @param hashed_message Pointer to buffer where the pre-hashed message will be stored.
  * @param hashed_message_len Pointer to size_t variable that will hold the length of the pre-hashed message.
  *
  * @returns: 1 on success, 0 on failure.
  */
 int HASHMLDSA_generate_hashed_message(const HASHMLDSA_CTX *ctx,
-                                      const HASHMLDSA *input_data,
+                                      const HASHMLDSA *data,
                                       unsigned char *hashed_message,
                                       size_t *hashed_message_len)
 {
-    if (ctx == NULL)
+    if (!validate_ctx_and_data(ctx, data))
+        return FAILURE;
+
+    return create_hashed_message(data, hashed_message, hashed_message_len);
+}
+
+/**
+ * HASHMLDSA_generate_hashed_message_init - prepare to generate a pre-hash of a message.
+ *
+ * @desc: initialise in preparation to generate a pre-hash of a message.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param hashed_message_len Pointer to size_t variable that will hold the length of the final pre-hashed message.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_generate_hashed_message_init(const HASHMLDSA_CTX *ctx,
+                                           HASHMLDSA *data,
+                                           size_t *hashed_message_len)
+{
+    struct hashMLDSA_digest *digest = NULL;
+
+    if (!validate_ctx_and_data(ctx, data))
         goto error;
 
-    if (input_data == NULL) {
-        set_error_message("No generate hash message input data provided");
+    digest = &data->digest;
+
+    if (hashed_message_len == NULL) {
+        set_error_message("No pointer to hashed message length provided");
         goto error;
     }
 
-    if (ctx->id != input_data->id) {
-        set_error_message("the input data of HASHMDLSA is not compatible with the context of HASHMLDSA_CTX");
+    if (EVP_DigestInit_ex(digest->mdctx, digest->md, NULL) <= 0) {
+        set_error_message("Failed to initialize digest: %s", ERR_error_string(ERR_get_error(), NULL));
         goto error;
     }
 
-    return create_hashed_message(input_data, hashed_message, hashed_message_len);
+    /* calculate the length of the hashed message, and save for future verification */
+    if (data->context_string_len > SIZE_MAX - 2 - digest->oid_len - digest->digest_hash_len) {
+        set_error_message("Hashed message length calculation would overflow");
+        goto error;
+    }
+
+    data->calculated_hashed_message_len = 1 + 1 + data->context_string_len + digest->oid_len + digest->digest_hash_len;
+
+    *hashed_message_len = data->calculated_hashed_message_len;
+    return SUCCESS;
 
 error:
+
+    return FAILURE;
+
+}
+
+/**
+ * HASHMLDSA_generate_hashed_message_update - add a message fragment to the message.
+ *
+ * @desc: Add a message fragment to the current set of message fragments. This can be called multiple times
+ * to build up the message to be pre-hashed.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param message_fragment The message fragment.
+ * @param hashed_message_len The size of the message fragment.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_generate_hashed_message_update(const HASHMLDSA_CTX *ctx,
+                                             HASHMLDSA *data,
+                                             const unsigned char* message_fragment,
+                                             size_t message_fragment_len)
+{
+    if (data && data->calculated_hashed_message_len == 0) {
+        set_error_message("Unable to update as init has not been called");
+        return FAILURE;
+    }
+
+    return validate_and_digest_update(ctx, data, message_fragment, message_fragment_len);
+}
+
+/**
+ * HASHMLDSA_generate_hashed_message_final - pre hash a message for use with signing of verifying.
+ *
+ * @desc: Perform the actual pre-hash on the collection of message fragments provided through the
+ * HASHMLDSA_generate_hashed_message_final API.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param hashed_message Pointer to buffer where the pre-hashed message will be stored.
+ * @param hashed_message_len Pointer to size_t variable that will hold the length of the pre-hashed message.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_generate_hashed_message_final(const HASHMLDSA_CTX *ctx,
+                                            HASHMLDSA *data,
+                                            unsigned char *hashed_message,
+                                            size_t *hashed_message_len)
+{
+    unsigned char *hash = NULL;
+
+    if (!validate_ctx_and_data(ctx, data))
+        goto error;
+
+    if (hashed_message == NULL) {
+        set_error_message("No hashed message pointer provided");
+        goto error;
+    }
+
+    if (hashed_message_len == NULL) {
+        set_error_message("No hashed message length pointer provided");
+        goto error;
+    }
+
+    if (data->calculated_hashed_message_len == 0) {
+        set_error_message("Unable to final as init has not been called");
+        goto error;
+    }
+
+    if (*hashed_message_len < data->calculated_hashed_message_len) {
+        set_error_message("Insufficient space provided for final hashed message");
+        goto error;
+    }
+
+    if (!digest_final(data, &hash))
+        goto error;
+
+    if (!build_hashed_message(data, hash, &hashed_message, hashed_message_len))
+        goto error;
+
+    /* reset the calculated hashed_message_len as we use this to detect if an initial init has been called */
+    data->calculated_hashed_message_len = 0;
+
+    if (hash != NULL)
+        clear_hash_memory(data, hash);
+
+    return SUCCESS;
+
+error:
+    if (hash != NULL)
+        clear_hash_memory(data, hash);
+
     return FAILURE;
 }
 
 
 /**
- * HASHMLDSA_sign - sign a message
+ * HASHMLDSA_sign - pre-hash and sign a message.
  *
  * @desc: This will sign a message creating the hash first or using a previously hashed message using the
  * provided private key. You can use this call to determine the size of the signature without performing a sign by passing
- * NULL for all parameters except the context and a point to the signature length
+ * NULL for all parameters except the context and a point to the signature length. This performs the action of an init/update/final
+ * in a single API call but also allows support for providing an already pre-hashed message.
  *
  * @param ctx Pointer to HASHMLDSA context.
  * @param priv_key The private key for signing.
- * @param input_data Pointer to HASHMLDSA_Params structure containing the message and digest information or hashed message.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters, message and context or pre-hashed message.
  * @param signature The buffer to store the generated signature.
  * @param signature_len Pointer to the size of the signature buffer. If NULL is passed for the signature this will contain the length required for the signature.
  *
@@ -999,24 +1431,20 @@ error:
  */
 int HASHMLDSA_sign(const HASHMLDSA_CTX *ctx,
                    EVP_PKEY *priv_key,
-                   const HASHMLDSA *input_data,
+                   const HASHMLDSA *data,
                    unsigned char *signature,
                    size_t *signature_len)
 {
-
-    const struct hashMLDSA_digest *digest;
-    const unsigned char *hashed_message = NULL;
-    unsigned char* generated_hash_message = NULL;
+    unsigned char *hashed_message = NULL;
     size_t hashed_message_len;
-
-    /* length of the hash, calculated from a hashed message or determined from the context if the hashing is done as part of the sign */
-    size_t hash_len;
-
     EVP_PKEY_CTX *sctx = NULL;
-    size_t sig_len = 0;
 
-    if (ctx == NULL) {
-        set_error_message("No Context provided");
+    if (ctx && signature == NULL) {
+        *signature_len = ctx->sig_len;
+        goto success;
+    }
+
+    if (!validate_ctx_and_data(ctx, data)) {
         goto error;
     }
 
@@ -1025,82 +1453,21 @@ int HASHMLDSA_sign(const HASHMLDSA_CTX *ctx,
         goto error;
     }
 
-    if (signature == NULL) {
-        *signature_len = ctx->sig_len;
-        goto success;
-    }
-
-    if (input_data == NULL) {
-        set_error_message("No Sign input data provided");
+    if (!validate_and_create_key_context(ctx, priv_key, &sctx))
         goto error;
-    }
-
-    if (ctx->id != input_data->id) {
-        set_error_message("the input data of HASHMDLSA is not compatible with the context of HASHMLDSA_CTX");
-        return FAILURE;
-    }
-
-    if (priv_key == NULL) {
-        set_error_message("No private key provided");
-        goto error;
-    }
-
-    if (!EVP_PKEY_is_a(priv_key, ctx->sig_alg_name)) {
-        set_error_message("Key is not of the expected type for signing as %s", ctx->sig_alg_name);
-        goto error;
-    }
-
-    if ((input_data->hashed_message == NULL || input_data->hashed_message_len == 0) && (input_data->message == NULL || input_data->message_len == 0)) {
-        set_error_message("No message or hash message provided");
-        goto error;
-    }
 
     if (*signature_len < ctx->sig_len) {
-        set_error_message("Insufficient space provided for signature");
-        *signature_len = ctx->sig_len;
+        set_error_message("Insufficient space provided for signature. provided=%zu, required=%zu", *signature_len, ctx->sig_len);
+        //*signature_len = ctx->sig_len;
         goto error;
     }
 
-    sctx = EVP_PKEY_CTX_new_from_pkey(ctx->lib_ctx, priv_key, NULL);
-    if (sctx == NULL) {
-        set_error_message("Failure in preparing signature context from private key; %s", ERR_error_string(ERR_get_error(), NULL));
+    if (!validate_and_hash_message_if_needed(data, &hashed_message, &hashed_message_len))
         goto error;
-    }
 
     if (EVP_PKEY_sign_message_init(sctx, ctx->sig_alg, ctx->signatureParameters) != 1) {
         set_error_message("Failure in EVP_PKEY_sign_message_init: %s", ERR_error_string(ERR_get_error(), NULL));
         goto error;
-    }
-
-    digest = &input_data->digest;
-
-    /* create the hashed message or use the one already provided */
-    if (input_data->hashed_message == NULL || input_data->hashed_message_len == 0) {
-            /* determine length of hashed_message */
-            if (create_hashed_message(input_data, NULL, &hashed_message_len) <= 0)
-                goto error;
-
-            /* allocate for the raw message */
-            generated_hash_message = OPENSSL_zalloc(hashed_message_len);
-            if (!generated_hash_message) {
-                set_error_message("Failed to allocate memory for hashed message");
-                goto error;
-            }
-
-            /* generated the hashed_message */
-            if (create_hashed_message(input_data, generated_hash_message, &hashed_message_len) <= 0)
-                goto error;
-
-            hashed_message = (const unsigned char*)generated_hash_message;
-            hash_len = digest->digest_hash_len;
-    } else {
-        /* use getting of the hashLength to validate the hashed message */
-        hash_len = get_hash_length(digest, input_data->hashed_message, input_data->hashed_message_len);
-        if (hash_len == 0) {
-            goto error;
-        }
-        hashed_message = input_data->hashed_message;
-        hashed_message_len = input_data->hashed_message_len;
     }
 
     if (EVP_PKEY_sign(sctx, signature, signature_len, hashed_message, hashed_message_len) != 1) {
@@ -1112,8 +1479,8 @@ success:
     if (sctx)
         EVP_PKEY_CTX_free(sctx);
 
-    if (generated_hash_message)
-        OPENSSL_free(generated_hash_message);
+    if (hashed_message && hashed_message != data->hashed_message)
+        OPENSSL_clear_free(hashed_message, hashed_message_len);
 
     return SUCCESS;
 
@@ -1121,21 +1488,176 @@ error:
     if (sctx)
         EVP_PKEY_CTX_free(sctx);
 
-    if (generated_hash_message)
-        OPENSSL_free(generated_hash_message);
+    if (hashed_message && hashed_message != data->hashed_message)
+        OPENSSL_clear_free(hashed_message, hashed_message_len);
 
     return FAILURE;
 }
 
 /**
- * HASHMLDSA_verify - verify a message
+ * HASHMLDSA_sign_init - prepare to sign a message.
+ *
+ * @desc: This will prepare to sign a message provided though one or more calls to HASHMLDSA_sign_init.
+ * This API will return the size of the signature that will be created as it is not dependent on the length of the message.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param priv_key The private key for signing.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param signature_len Pointer to the size of the signature buffer. If NULL is passed for the signature this will contain the length required for the signature.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_sign_init(const HASHMLDSA_CTX *ctx,
+                   EVP_PKEY *priv_key,
+                   HASHMLDSA *data,
+                   size_t *signature_len)
+{
+    if (signature_len == NULL) {
+        set_error_message("Pointer for signature len is NULL");
+        goto error;
+    }
+
+    if (!validate_and_digest_init(ctx, priv_key, data))
+        goto error;
+
+    if (EVP_PKEY_sign_message_init(data->key_ctx, ctx->sig_alg, ctx->signatureParameters) != 1) {
+        set_error_message("Failure in EVP_PKEY_sign_message_init: %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+
+    *signature_len = ctx->sig_len;
+    return SUCCESS;
+
+error:
+    if (data && data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+    return FAILURE;
+}
+
+/**
+ * HASHMLDSA_sign_update - add a message fragment to the message.
+ *
+ * @desc: Add a message fragment to the current set of message fragments. This can be called multiple times
+ * to build up the message to be pre-hashed and signed.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param message_fragment The message fragment.
+ * @param hashed_message_len The size of the message fragment.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_sign_update(const HASHMLDSA_CTX *ctx,
+                   HASHMLDSA *data,
+                   const unsigned char* message_fragment,
+                   size_t message_fragment_len)
+{
+    if (data && data->key_ctx == NULL) {
+        set_error_message("Cannot update, init has not been called");
+        return FAILURE;
+    }
+
+    return validate_and_digest_update(ctx, data, message_fragment, message_fragment_len);
+}
+
+/**
+ * HASHMLDSA_sign_final - pre-hash and sign the final message.
+ *
+ * @desc: This will pre-hash and sign the complete message using the private key provided via HASHMLDSA_sign_init. Note
+ * The final message is not stored in the data object.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param signature The buffer to store the generated signature.
+ * @param signature_len Pointer to the size of the signature buffer.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_sign_final(const HASHMLDSA_CTX *ctx,
+                   HASHMLDSA *data,
+                   unsigned char *signature,
+                   size_t *signature_len)
+{
+    unsigned char *hashed_message = NULL;
+    unsigned char* hash = NULL;
+    size_t calculated_hashed_message_len;
+
+    if (!validate_ctx_and_data(ctx, data))
+        goto error;
+
+    if (signature_len == NULL) {
+        set_error_message("No pointer for Signature length provided");
+        goto error;
+    }
+
+    if (signature == NULL) {
+        set_error_message("No Signature buffer provided");
+        goto error;
+    }
+
+    if (*signature_len < ctx->sig_len) {
+        set_error_message("Insufficient space provided for signature");
+        *signature_len = ctx->sig_len;
+        goto error;
+    }
+
+    if (data && data->key_ctx == NULL) {
+        set_error_message("Cannot update, init has not been called");
+        goto error;
+    }
+
+    if (!digest_final(data, &hash))
+        goto error;
+
+    if (!build_hashed_message(data, hash, &hashed_message, &calculated_hashed_message_len))
+        goto error;
+
+    if (EVP_PKEY_sign(data->key_ctx, signature, signature_len, hashed_message, calculated_hashed_message_len) != 1) {
+        set_error_message("Failure in EVP_PKEY_sign while signing: %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+
+    if (data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+
+    if (hashed_message)
+        OPENSSL_clear_free(hashed_message, calculated_hashed_message_len);
+
+    if (hash)
+        clear_hash_memory(data, hash);
+
+
+    return SUCCESS;
+
+error:
+    if (data && data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+
+    if (hashed_message)
+        OPENSSL_clear_free(hashed_message, calculated_hashed_message_len);
+
+    if (hash)
+        clear_hash_memory(data, hash);
+
+    return FAILURE;
+}
+
+/**
+ * HASHMLDSA_verify - verify a message.
  *
  * @desc: This will verify a message creating the hash first or using a previously hashed message using the
- * provided public key.
+ * provided public key. This performs the action of an init/update/final
+ * in a single API call but also allows support for providing an already pre-hashed message.
  *
  * @param ctx Pointer to HASHMLDSA context.
  * @param public_key The public key for verifying.
- * @param input_data Pointer to HASHMLDSA structure containing the message or hashed message.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters, message and context or pre-hashed message.
  * @param signature The signature to verify.
  * @param signature_len The size of the signature buffer.
  *
@@ -1143,83 +1665,28 @@ error:
  */
 int HASHMLDSA_verify(const HASHMLDSA_CTX *ctx,
                      EVP_PKEY *public_key,
-                     const HASHMLDSA *input_data,
+                     const HASHMLDSA *data,
                      const unsigned char *signature,
                      size_t signature_len)
 {
-
     EVP_PKEY_CTX *vctx = NULL;
-    const struct hashMLDSA_digest *digest;
-    unsigned char *generated_hash_message = NULL;
-    const unsigned char *hashed_message = NULL;
+    unsigned char *hashed_message = NULL;
     size_t hashed_message_len = 0;
-    size_t hash_len = 0;
     int verify = 0;
 
-    if (ctx == NULL)
+    if (!validate_ctx_and_data(ctx, data))
         goto error;
 
-    if (input_data == NULL) {
-        set_error_message("No Verify input data provided");
+    if (!validate_and_create_key_context(ctx, public_key, &vctx))
         goto error;
-    }
-
-    if (ctx->id != input_data-> id) {
-        set_error_message("the input data of HASHMDLSA is not compatible with the context of HASHMLDSA_CTX");
-        return FAILURE;
-    }
-
-    if (public_key == NULL) {
-        set_error_message("Public key is NULL");
-        goto error;
-    }
-
-    if (!EVP_PKEY_is_a(public_key, ctx->sig_alg_name)) {
-        set_error_message("Key is not of the expected type for verifying as %s", ctx->sig_alg_name);
-        goto error;
-    }
 
     if (signature == NULL || signature_len == 0) {
         set_error_message("Signature is NULL or length was 0");
         goto error;
     }
 
-    if ((input_data->hashed_message == NULL || input_data->hashed_message_len == 0) && (input_data->message == NULL || input_data->message_len == 0)) {
-        set_error_message("No message or hash message");
+    if (!validate_and_hash_message_if_needed(data, &hashed_message, &hashed_message_len))
         goto error;
-    }
-
-    digest = &input_data->digest;
-
-    if (input_data->hashed_message == NULL || input_data->hashed_message_len == 0) {
-        /* determine length of hashed_message */
-        if (create_hashed_message(input_data, NULL, &hashed_message_len) <= 0)
-            goto error;
-
-        generated_hash_message = OPENSSL_zalloc(hashed_message_len);
-        if (!generated_hash_message) {
-            set_error_message("Failed to allocate memory for hashed_message");
-            goto error;
-        }
-
-        /* generate the hashed_message */
-        if (create_hashed_message(input_data, generated_hash_message, &hashed_message_len) <= 0)
-            goto error;
-        hashed_message = (const unsigned char*)generated_hash_message;
-    } else {
-        hash_len = get_hash_length(digest, input_data->hashed_message, input_data->hashed_message_len);
-        if (hash_len == 0)
-            goto error;
-
-        hashed_message = input_data->hashed_message;
-        hashed_message_len = input_data->hashed_message_len;
-    }
-
-    vctx = EVP_PKEY_CTX_new_from_pkey(ctx->lib_ctx, public_key, NULL);
-    if (vctx == NULL) {
-        set_error_message("Failure in preparing signature context: %s", ERR_error_string(ERR_get_error(), NULL));
-        goto error;
-    }
 
     if (EVP_PKEY_verify_message_init(vctx, ctx->sig_alg, ctx->signatureParameters) <= 0) {
         set_error_message("Did not message verify init: %s", ERR_error_string(ERR_get_error(), NULL));
@@ -1232,19 +1699,161 @@ int HASHMLDSA_verify(const HASHMLDSA_CTX *ctx,
         goto error;
     }
 
-    if (generated_hash_message)
-        OPENSSL_free(generated_hash_message);
+    if (hashed_message && hashed_message != data->hashed_message)
+        OPENSSL_clear_free(hashed_message, hashed_message_len);
 
     if (vctx)
         EVP_PKEY_CTX_free(vctx);
     return SUCCESS;
 
 error:
-    if (generated_hash_message)
-        OPENSSL_free(generated_hash_message);
+    if (hashed_message && hashed_message != data->hashed_message)
+        OPENSSL_clear_free(hashed_message, hashed_message_len);
 
     if (vctx)
         EVP_PKEY_CTX_free(vctx);
+
+    return FAILURE;
+}
+
+
+/**
+ * HASHMLDSA_verify_init - prepare to verify a message.
+ *
+ * @desc: This will verify a message creating the hash first or using a previously hashed message using the
+ * provided public key.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param public_key The public key for verifying.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_verify_init(const HASHMLDSA_CTX *ctx,
+                   EVP_PKEY *public_key,
+                   HASHMLDSA *data)
+{
+    if (!validate_and_digest_init(ctx, public_key, data))
+        goto error;
+
+    if (EVP_PKEY_verify_message_init(data->key_ctx, ctx->sig_alg, ctx->signatureParameters) <= 0) {
+        set_error_message("Did not message verify init: %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+
+    return SUCCESS;
+
+error:
+    if (data && data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+    return FAILURE;
+}
+
+/**
+ * HASHMLDSA_verify_update - add a message fragment to the message.
+ *
+ * @desc: Add a message fragment to the current set of message fragments. This can be called multiple times
+ * to build up the message to be pre-hashed and verified.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA structure containing algorithm-specific parameters.
+ * @param message_fragment The message fragment.
+ * @param hashed_message_len The size of the message fragment.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_verify_update(const HASHMLDSA_CTX *ctx,
+                            HASHMLDSA *data,
+                            const unsigned char* message_fragment,
+                            size_t message_fragment_len) {
+    if (data && data->key_ctx == NULL) {
+        set_error_message("Cannot update, init has not been called");
+        return FAILURE;
+    }
+
+    return validate_and_digest_update(ctx, data, message_fragment, message_fragment_len);
+}
+
+
+/**
+ * HASHMLDSA_verify_final - pre-hash and verify the final message.
+ *
+ * @desc: This will pre-hash and verify the complete message using the provided signature and public key provided via HASHMLDSA_sign_init.
+ * Note The final message is not stored in the data object.
+ *
+ * @param ctx Pointer to HASHMLDSA context.
+ * @param data Pointer to HASHMLDSA_Params structure containing the context and digest information.
+ * @param signature The buffer to store the generated signature.
+ * @param signature_len Pointer to the size of the signature buffer.
+ *
+ * @returns: 1 on success, 0 on failure.
+ */
+int HASHMLDSA_verify_final(const HASHMLDSA_CTX *ctx,
+                   HASHMLDSA *data,
+                   unsigned char *signature,
+                   size_t signature_len) {
+    unsigned char *hashed_message = NULL;
+    unsigned char* hash = NULL;
+    size_t calculated_hashed_message_len;
+    int verify = 0;
+
+    if (!validate_ctx_and_data(ctx, data))
+        goto error;
+
+    if (signature == NULL || signature_len == 0) {
+        set_error_message("Signature is NULL or length was 0");
+        goto error;
+    }
+
+    if (data && data->key_ctx == NULL) {
+        set_error_message("Cannot finalise, init has not been called");
+        goto error;
+    }
+
+    if (signature_len < ctx->sig_len) {
+        set_error_message("Signature len is not big enough, expected:%zu", ctx->sig_len);
+        goto error;
+    }
+
+    if (!digest_final(data, &hash))
+        goto error;
+
+    if (!build_hashed_message(data, hash, &hashed_message, &calculated_hashed_message_len))
+        goto error;
+
+    verify = EVP_PKEY_verify(data->key_ctx, signature, signature_len, hashed_message, calculated_hashed_message_len);
+    if (verify <= 0) {
+        set_error_message("Did not verify signature: %s", ERR_error_string(ERR_get_error(), NULL));
+        goto error;
+    }
+
+    if (data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+
+    if (hashed_message)
+        OPENSSL_clear_free(hashed_message, calculated_hashed_message_len);
+
+    if (hash)
+        clear_hash_memory(data, hash);
+
+
+    return SUCCESS;
+
+error:
+    if (data && data->key_ctx) {
+        EVP_PKEY_CTX_free(data->key_ctx);
+        data->key_ctx = NULL;
+    }
+
+    if (hashed_message)
+        OPENSSL_clear_free(hashed_message, calculated_hashed_message_len);
+
+    if (hash)
+        clear_hash_memory(data, hash);
 
     return FAILURE;
 }
