@@ -14,9 +14,9 @@
 # limitations under the License.
 #
 
-OPENSSL_INSTALL_DIR=/opt/openssl
+OPENSSL_INSTALL_DIR=
 CC = gcc
-CFLAGS = -fPIC
+CFLAGS = -fPIC -Wunused -g
 LDFLAGS = -shared
 SRC = hashMLDSA.c
 OBJ = hashMLDSA.o
@@ -45,10 +45,10 @@ $(OBJ): $(SRC)
 	$(CC) -g $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(TEST_EXE): $(TEST_SRC) $(TARGET_LIB)
-	$(CC) -g -L. -L$(OPENSSL_INSTALL_DIR)/${LIBDIR} -Wl,-rpath,. -Wl,-rpath,$(OPENSSL_INSTALL_DIR)/${LIBDIR} $(INCLUDES) -o $@ $(TEST_SRC) -lhashmldsa -lssl -lcrypto
+	$(CC) -g $(CFLAGS) -L. -L$(OPENSSL_INSTALL_DIR)/${LIBDIR} -Wl,-rpath,. -Wl,-rpath,$(OPENSSL_INSTALL_DIR)/${LIBDIR} $(INCLUDES) -o $@ $(TEST_SRC) -lhashmldsa -lssl -lcrypto
 
 $(TEST_EXE_2): $(TEST_SRC_2) $(TARGET_LIB)
-	$(CC) -g -L. -L$(OPENSSL_INSTALL_DIR)/${LIBDIR} -Wl,-rpath,. -Wl,-rpath,$(OPENSSL_INSTALL_DIR)/${LIBDIR} $(INCLUDES) -o $@ $(TEST_SRC_2) -lhashmldsa -lssl -lcrypto
+	$(CC) -g $(CFLAGS) -L. -L$(OPENSSL_INSTALL_DIR)/${LIBDIR} -Wl,-rpath,. -Wl,-rpath,$(OPENSSL_INSTALL_DIR)/${LIBDIR} $(INCLUDES) -o $@ $(TEST_SRC_2) -lhashmldsa -lssl -lcrypto
 
 clean:
 	rm -f $(OBJ) $(TARGET_LIB) $(TEST_EXE) $(TEST_EXE_2) test_actions.o test_validation.o hashMLDSA.o

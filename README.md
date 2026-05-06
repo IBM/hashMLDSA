@@ -32,7 +32,7 @@ These are the strengths that OpenSSL creates for each of the signature algorithm
 
 ## Code Examples
 
-The following a small snippets showing the use of the library
+The following are small snippets showing example uses of the library
 
 ### Signing a message which has not been pre-hashed
 
@@ -84,6 +84,67 @@ exit:
     HASHMLDSA_clear_last_error();
     return rc;
 ```
+
+### Signing a set of message fragments
+
+```c
+#include "hashMLDSA.h"
+...
+HASHMLDSA_CTX *hashmldsa_ctx = NULL;
+HASHMLDSA *hashmldsa_data = NULL;
+char *signature = NULL;
+size_t signature_len = 0;
+EVP_PKEY *private_key = NULL; // to contain the private key (to be populated by app)
+OSSL_LIB_CTX *lib_ctx;        // openssl library context (to be populated by app)
+int rc = SUCCESS;             // developer defined return codes SUCCESS, FAILURE
+
+const char* fragments[3];     // message fragments that make up the whole message
+size_t fragment_size;         // for simplicity each fragment is the same length
+...
+hashmldsa_ctx = HASHMLDSA_CTX_new(lib_ctx, "ML-DSA-44");
+if (hashmldsa_ctx == NULL) {
+    HASHMLDSA_print_last_error(stderr);
+    rc = FAILURE;
+    goto exit;
+}
+...
+hashmldsa_data = HASHMLDSA_new(hashmldsa_ctx);
+if (hashmldsa_data == NULL) {
+    HASHMLDSA_print_last_error(stderr);
+    rc = FAILURE;
+    goto exit;
+}
+
+// init and obtain the signature length
+if (!HASHMLDSA_sign_init(hashmldsa_ctx, private_key, hashmldsa_data, &signature_len)) {
+    HASHMLDSA_print_last_error(stderr);
+    rc = FAILURE;
+    goto exit;
+}
+
+signature = OPENSSL_zalloc(signature_len);
+for (int i = 0; i < 3; i++) {
+    if (!HASHMLDSA_sign_update(hashmldsa_ctx, hashmldsa_data, fragments[i], fragment_size)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = FAILURE;
+    }
+}
+
+if (!HASHMLDSA_sign_final(hashmldsa_ctx, hashmldsa_data, signature, &signature_len)) {
+    HASHMLDSA_print_last_error(stderr);
+    rc = FAILURE;
+    goto exit;
+}
+
+// do something with signature
+
+exit:
+    HASHMLDSA_free(hashmldsa_data);
+    HASHMLDSA_CTX_free(hashmldsa_ctx);
+    HASHMLDSA_clear_last_error();
+    return rc;
+```
+
 
 ### Verifying a prehashed message
 

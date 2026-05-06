@@ -32,7 +32,8 @@ typedef struct {
 static OSSL_LIB_CTX *lib_ctx;
 
 
-static int decode_testcase(TestCase test, Decoded_TestCase *decoded_testcase)
+static int decode_testcase(TestCase test,
+                           Decoded_TestCase *decoded_testcase)
 {
 
     unsigned char *serialised_key = NULL;
@@ -84,7 +85,12 @@ error:
 
 typedef int (*create_context_and_data)(TestCase test, unsigned char det_mode, HASHMLDSA_CTX **hashmldsa_ctx, HASHMLDSA **hashmldsa_data, HASHMLDSA **hashmldsa_hash_data);
 
-static int create_ctx_and_data(TestCase test, unsigned char det_mode, HASHMLDSA_CTX **hashmldsa_ctx, HASHMLDSA **hashmldsa_data, HASHMLDSA **hashmldsa_hash_data) {
+static int create_ctx_and_data(TestCase test,
+                               unsigned char det_mode,
+                               HASHMLDSA_CTX **hashmldsa_ctx,
+                               HASHMLDSA **hashmldsa_data,
+                               HASHMLDSA **hashmldsa_hash_data)
+{
     fprintf(stderr, "[INFO] using default hash on CONTEXT\n");
     if (det_mode == 'd')
         *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(lib_ctx, test.key_type);  /* this will create a deterministic signature */
@@ -134,7 +140,12 @@ error:
     return -1;
 }
 
-static int create_ctx_with_hash_and_data(TestCase test, unsigned char det_mode, HASHMLDSA_CTX **hashmldsa_ctx, HASHMLDSA **hashmldsa_data, HASHMLDSA **hashmldsa_hash_data) {
+static int create_ctx_with_hash_and_data(TestCase test,
+                                         unsigned char det_mode,
+                                         HASHMLDSA_CTX **hashmldsa_ctx,
+                                         HASHMLDSA **hashmldsa_data,
+                                         HASHMLDSA **hashmldsa_hash_data)
+{
     fprintf(stderr, "[INFO] Setting digest hash on CONTEXT to %s\n", test.hash_name);
     if (det_mode == 'd')
         *hashmldsa_ctx = HASHMLDSA_CTX_new_for_test(lib_ctx, test.key_type);  /* this will create a deterministic signature */
@@ -191,7 +202,12 @@ error:
     return -1;
 }
 
-static int create_ctx_and_data_with_hash(TestCase test, unsigned char det_mode, HASHMLDSA_CTX **hashmldsa_ctx, HASHMLDSA **hashmldsa_data, HASHMLDSA **hashmldsa_hash_data) {
+static int create_ctx_and_data_with_hash(TestCase test,
+                                         unsigned char det_mode,
+                                         HASHMLDSA_CTX **hashmldsa_ctx,
+                                         HASHMLDSA **hashmldsa_data,
+                                         HASHMLDSA **hashmldsa_hash_data)
+{
     fprintf(stderr, "[INFO] setting hash on DATA to %s\n", test.hash_name);
 
     if (det_mode == 'd')
@@ -259,15 +275,339 @@ error:
     return -1;
 }
 
-static int test_sign_and_verify(Decoded_TestCase decoded_testcase, TestCase test, unsigned char det_mode, unsigned char hash_mode, create_context_and_data create_ctx_data) {
+static int create_hash(Decoded_TestCase decoded_testcase,
+                       TestCase test,
+                       HASHMLDSA_CTX *hashmldsa_ctx,
+                       HASHMLDSA *hashmldsa_hash_data,
+                       unsigned char** generated_hashed_message,
+                       size_t *hashed_message_len)
+{
+    unsigned char *hashed_message = NULL;
+    unsigned char *hashed_message_multi = NULL;
+    size_t hashed_message_len_multi = 0;
+    int rc = 0;
+
+    unsigned int start_point = 0;
+    unsigned int chunks = 4;
+    unsigned int chunk_size;
+
+    fprintf(stderr, "[INFO] creating pre hashed message\n");
+
+    if (!HASHMLDSA_set_context_string(hashmldsa_hash_data, decoded_testcase.ctx, decoded_testcase.ctx_len)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+    HASHMLDSA_set_message(hashmldsa_hash_data, decoded_testcase.message, decoded_testcase.message_len);
+
+    /* test both ways of generating a hash message and see if they compare */
+
+    /* first create using the single shot */
+    fprintf(stderr, "[INFO] creating pre hashed message via single shot\n");
+
+    if (!HASHMLDSA_generate_hashed_message(hashmldsa_ctx, hashmldsa_hash_data, NULL, hashed_message_len)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+    hashed_message = OPENSSL_zalloc(*hashed_message_len);
+    if (!HASHMLDSA_generate_hashed_message(hashmldsa_ctx, hashmldsa_hash_data, hashed_message, hashed_message_len)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+
+    /* now create using multishot */
+    fprintf(stderr, "[INFO] creating pre hashed message via multi shot\n");
+    if (!HASHMLDSA_generate_hashed_message_init(hashmldsa_ctx, hashmldsa_hash_data, &hashed_message_len_multi)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+    if (hashed_message_len_multi != *hashed_message_len) {
+        fprintf(stderr, "[ERROR] hashed message lengths not equal %d != %d\n", hashed_message_len, hashed_message_len_multi);
+        rc = -1;
+        goto exit;
+    }
+    fprintf(stderr, "[INFO] hashed message lengths are equal to %d\n", hashed_message_len_multi);
+
+    start_point = 0;
+    chunks = 4;
+    if (decoded_testcase.message_len < chunks) {
+        chunks = decoded_testcase.message_len;
+    }
+    chunk_size = (decoded_testcase.message_len / chunks);
+
+    for (int i = 1; i <= chunks; i++) {
+        if (i == chunks) {
+            chunk_size = decoded_testcase.message_len - start_point;
+        }
+
+        if (!HASHMLDSA_generate_hashed_message_update(hashmldsa_ctx, hashmldsa_hash_data, &decoded_testcase.message[start_point], chunk_size)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
+        start_point += chunk_size;
+    }
+
+    hashed_message_multi = OPENSSL_zalloc(hashed_message_len_multi);
+    if (!HASHMLDSA_generate_hashed_message_final(hashmldsa_ctx, hashmldsa_hash_data, hashed_message_multi, &hashed_message_len_multi)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+    /* Compare multi-shot to single-shot*/
+    if (memcmp(hashed_message, hashed_message_multi, *hashed_message_len) != 0) {
+        fprintf(stderr, "[ERROR] Hashed message does not match\n");
+        rc = -1;
+        goto exit;
+    }
+
+    fprintf(stderr, "[SUCCESS] Hashed messages from single and multi shot match\n");
+    *generated_hashed_message = hashed_message;
+
+exit:
+    if (hashed_message_multi)
+        OPENSSL_free(hashed_message_multi);
+
+    HASHMLDSA_clear_last_error();
+
+    return rc;
+}
+
+static int perform_sign(Decoded_TestCase decoded_testcase,
+                        TestCase test, HASHMLDSA_CTX *hashmldsa_ctx,
+                        HASHMLDSA *hashmldsa_data,
+                        char det_mode,
+                        char hash_mode,
+                        unsigned char** signature_single,
+                        unsigned char** signature_multi,
+                        size_t *signature_len)
+{
+    size_t signature_len_multi = 0;
+
+    unsigned int start_point = 0;
+    unsigned int chunks = 4;
+    unsigned int chunk_size;
+
+    unsigned char *encoded_signature = NULL;
+
+    int rc = 0;
+
+    /* initially set to indicate no multishot signature needs verifying */
+    *signature_multi = NULL;
+
+    /*
+     * Single Shot Signing: Perform the following steps
+     * 1. determine signature size via the API
+     *    TODO (we could have a separate API for this as well, but this matches the OpenSSL pattern to get the exact size
+     *    whereas OpenSSL also has another api to get the biggest size possible, but we could determine the exact size in a simple API)
+     * 2. Allocate memory to hold the signature
+     * 3. Perform the Sign
+     */
+    fprintf(stderr, "[INFO] determining signature size for signing via single shot\n");
+
+    if (!HASHMLDSA_sign(hashmldsa_ctx, NULL, NULL, NULL, signature_len)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+    fprintf(stderr, "[INFO] single shot signing with determined sig size of %d\n", *signature_len);
+    *signature_single = OPENSSL_zalloc(*signature_len);
+
+    if (!HASHMLDSA_sign(hashmldsa_ctx, decoded_testcase.private_key, hashmldsa_data, *signature_single, signature_len)) {
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+    fprintf(stderr, "[SUCCESS] single shot signing successful\n", *signature_len);
+
+    /*
+     * Multi shot Signing, only perform this if not hash mode as multi shot never uses the hashed message in data
+     * compare it to single shot only if in deterministic mode - otherwise we need to test via verify
+     */
+    if (hash_mode != 'h') {
+        fprintf(stderr, "[INFO] determining signature size for signing via multi shot and comparing to single shot\n");
+        if (!HASHMLDSA_sign_init(hashmldsa_ctx, decoded_testcase.private_key, hashmldsa_data, &signature_len_multi)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
+
+        if (signature_len_multi != *signature_len) {
+            fprintf(stderr, "[ERROR] 1 signature lengths not equal %d != %d\n", signature_len, signature_len_multi);
+            rc = -1;
+            goto exit;
+        }
+        fprintf(stderr, "[INFO] signature lengths from single and multishot are equal\n");
+
+        if (decoded_testcase.message_len < chunks) {
+            chunks = decoded_testcase.message_len;
+        }
+        chunk_size = (decoded_testcase.message_len / chunks);
+
+        for (int i = 1; i <= chunks; i++) {
+            if (i == chunks) {
+                chunk_size = decoded_testcase.message_len - start_point;
+            }
+            if (!HASHMLDSA_sign_update(hashmldsa_ctx, hashmldsa_data, &decoded_testcase.message[start_point], chunk_size)) {
+                HASHMLDSA_print_last_error(stderr);
+                rc = -1;
+                goto exit;
+            }
+            start_point += chunk_size;
+        }
+
+        *signature_multi = OPENSSL_zalloc(signature_len_multi);
+        if (!HASHMLDSA_sign_final(hashmldsa_ctx, hashmldsa_data, *signature_multi, &signature_len_multi)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
+    }
+
+    /*
+     * verify the signature against the testcase information if deterministic, if not check that we don't match
+     * the signature to prove we aren't deterministic when not requested
+     */
+    encoded_signature = byteArray2hexString(*signature_single, *signature_len);
+
+    if (det_mode == 'd') {
+        /* deterministic mode */
+
+        if (hash_mode != 'h') {
+            /* not prehash mode so we will have created a multishot signature */
+            fprintf(stderr, "Checking single shot and multi shot signatures match\n");
+            if (memcmp(*signature_single, *signature_multi, *signature_len) == 0) {
+                fprintf(stderr, "[SUCCESS] single shot and multi shot signatures match\n");
+            } else {
+                fprintf(stderr, "[ERROR] single shot and multi shot signatures do not match\n");
+                rc = -1;
+                goto exit;
+            }
+
+            /* can now clear out the multishot signature as we know it's good so don't need to run it through a verify check */
+            OPENSSL_free(*signature_multi);
+            *signature_multi = NULL;
+        }
+
+        fprintf(stderr, "[INFO] Checking resulting signature against test vector as it's deterministic....\n");
+        /* TODO: Could also check the length as well */
+        if (strncmp(encoded_signature, test.encoded_expected_signature, *signature_len) == 0) {
+            fprintf(stdout, "[SUCCESS] Generated signature matches the test vector\n");
+        } else {
+            fprintf(stdout, "[FAILURE] Generated signature DOES NOT MATCH the test vector\n");
+            rc = -1;
+            goto exit;
+        }
+    } else {
+        if (test.encoded_expected_signature != NULL) {
+            if (strncmp(encoded_signature, test.encoded_expected_signature, *signature_len) == 0) {
+                fprintf(stdout, "[FAILURE] Generated signature UNEXPECTEDLY matches the test vector\n");
+                rc = -1;
+                goto exit;
+            } else {
+                fprintf(stdout, "[SUCCESS] Generated signature DOES NOT MATCH the test vector as EXPECTED\n");
+            }
+        }
+    }
+
+    exit:
+        if (encoded_signature)
+            free(encoded_signature);
+        return rc;
+}
+
+static int perform_verify(Decoded_TestCase decoded_testcase,
+                          TestCase test,
+                          HASHMLDSA_CTX *hashmldsa_ctx,
+                          HASHMLDSA *hashmldsa_data,
+                          EVP_PKEY *public_key,
+                          char hash_mode,
+                          unsigned char* signature,
+                          size_t signature_len)
+{
+    int rc = 0;
+
+    unsigned int start_point = 0;
+    unsigned int chunks = 4;
+    unsigned int chunk_size;
+
+    /* Single shot verification */
+    fprintf(stdout, "[INFO] starting single shot verification \n");
+    if (HASHMLDSA_verify(hashmldsa_ctx, public_key, hashmldsa_data, signature, signature_len))
+        fprintf(stdout, "[SUCCESS] verification successful\n");
+    else {
+        fprintf(stdout, "[FAILURE] did not verify against the public key\n");
+        HASHMLDSA_print_last_error(stderr);
+        rc = -1;
+        goto exit;
+    }
+
+    /* check the hash mode, if we pre-hashed then no point doing a multi-shot verification as there is no context in the data */
+    if (hash_mode != 'h') {
+        /* Multishot verification */
+        fprintf(stdout, "[INFO] starting multishot shot verification\n");
+        if (!HASHMLDSA_verify_init(hashmldsa_ctx, public_key, hashmldsa_data)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
+
+        /* perform the update to add message in fragments */
+        start_point = 0;
+        chunks = 4;
+        if (decoded_testcase.message_len < chunks) {
+            chunks = decoded_testcase.message_len;
+        }
+        chunk_size = (decoded_testcase.message_len / chunks);
+
+        for (int i = 1; i <= chunks; i++) {
+            if (i == chunks) {
+                chunk_size = decoded_testcase.message_len - start_point;
+            }
+            if (!HASHMLDSA_verify_update(hashmldsa_ctx, hashmldsa_data, &decoded_testcase.message[start_point], chunk_size)) {
+                HASHMLDSA_print_last_error(stderr);
+                rc = -1;
+                goto exit;
+            }
+            start_point += chunk_size;
+
+        }
+
+        if (!HASHMLDSA_verify_final(hashmldsa_ctx, hashmldsa_data, signature, signature_len)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
+    }
+
+exit:
+    return rc;
+}
+
+
+static int test_sign_and_verify(Decoded_TestCase decoded_testcase,
+                                TestCase test,
+                                unsigned char det_mode,
+                                unsigned char hash_mode,
+                                create_context_and_data create_ctx_data)
+{
     int rc = 0;
 
     unsigned char *signature = NULL;
+    unsigned char *signature_multi = NULL;
     size_t signature_len = 0;
+
     unsigned char *hashed_message = NULL;
     size_t hashed_message_len = 0;
-
-    char* encodedSignature = NULL;
 
     HASHMLDSA_CTX *hashmldsa_ctx = NULL;
     HASHMLDSA *hashmldsa_hash_data = NULL;
@@ -283,61 +623,33 @@ static int test_sign_and_verify(Decoded_TestCase decoded_testcase, TestCase test
     };
 
     if (hash_mode == 'h') {
-        /* this mode means the application creates the prehash */
-        fprintf(stderr, "[INFO] creating pre hashed message\n");
+        /* The application creates the hashed message */
 
-        if (!HASHMLDSA_set_context_string(hashmldsa_hash_data, decoded_testcase.ctx, decoded_testcase.ctx_len)) {
-            HASHMLDSA_print_last_error(stderr);
-            rc = -1;
-            goto exit;
-        }
-        HASHMLDSA_set_message(hashmldsa_hash_data, decoded_testcase.message, decoded_testcase.message_len);
-        if (!HASHMLDSA_generate_hashed_message(hashmldsa_ctx, hashmldsa_hash_data, NULL, &hashed_message_len)) {
-            HASHMLDSA_print_last_error(stderr);
-            rc = -1;
-            goto exit;
-        }
-        hashed_message = OPENSSL_zalloc(hashed_message_len);
-        if (!HASHMLDSA_generate_hashed_message(hashmldsa_ctx, hashmldsa_hash_data, hashed_message, &hashed_message_len)) {
-            HASHMLDSA_print_last_error(stderr);
+        if (create_hash(decoded_testcase, test, hashmldsa_ctx, hashmldsa_hash_data, &hashed_message, &hashed_message_len) == -1) {
             rc = -1;
             goto exit;
         }
 
-        /* set the hashed message into the HASHMLDSA instance */
-        //fprintf(stderr, "%s=%s\n", test.hash_name, byteArray2hexString(hashed_message, hashed_message_len));
-        HASHMLDSA_set_hashed_message(hashmldsa_data, hashed_message, hashed_message_len);
+        if (!HASHMLDSA_set_hashed_message(hashmldsa_data, hashed_message, hashed_message_len)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
     } else {
-        /* this mode means the library creates the prehash */
-        /* set the original message into the HASHMLDSA instance */
+        /* The library creates the hashed_message */
         if (!HASHMLDSA_set_context_string(hashmldsa_data, decoded_testcase.ctx, decoded_testcase.ctx_len)) {
             HASHMLDSA_print_last_error(stderr);
             rc = -1;
             goto exit;
         }
-        HASHMLDSA_set_message(hashmldsa_data, decoded_testcase.message, decoded_testcase.message_len);
+        if (!HASHMLDSA_set_message(hashmldsa_data, decoded_testcase.message, decoded_testcase.message_len)) {
+            HASHMLDSA_print_last_error(stderr);
+            rc = -1;
+            goto exit;
+        }
     }
 
-    /*
-     * Perform the following steps
-     * 1. determine signature size via the API
-     *    TODO (we could have a separate API for this as well, but this matches the OpenSSL pattern to get the exact size
-     *    whereas OpenSSL also has another api to get the biggest size possible, but we could determin the exact size in a simple API)
-     * 2. Allocate memory to hold the signature
-     * 3. Perform the Sign
-     */
-    fprintf(stderr, "[INFO] determining signature size for signing\n");
-
-    if (!HASHMLDSA_sign(hashmldsa_ctx, NULL, NULL, NULL, &signature_len)) {
-        HASHMLDSA_print_last_error(stderr);
-        rc = -1;
-        goto exit;
-    }
-    fprintf(stderr, "[INFO] signing with determined size of %d\n", signature_len);
-    signature = OPENSSL_zalloc(signature_len);
-
-    if (!HASHMLDSA_sign(hashmldsa_ctx, decoded_testcase.private_key, hashmldsa_data, signature, &signature_len)) {
-        HASHMLDSA_print_last_error(stderr);
+    if (perform_sign(decoded_testcase, test, hashmldsa_ctx, hashmldsa_data, det_mode, hash_mode, &signature, &signature_multi, &signature_len) == -1) {
         rc = -1;
         goto exit;
     }
@@ -347,39 +659,6 @@ static int test_sign_and_verify(Decoded_TestCase decoded_testcase, TestCase test
     HASHMLDSA_CTX_free(hashmldsa_ctx);
     hashmldsa_ctx = NULL;
 
-    /*
-     * verify the signature against the testcase information if deterministic, if not check that we don't match
-     * the signature to prove we aren't deterministic when not requested
-     */
-    encodedSignature = byteArray2hexString(signature, signature_len);
-    if (det_mode == 'd') {
-        fprintf(stderr, "[INFO] Checking resulting signature against test vector as it's deterministic....\n");
-        /* TODO: Could also check the length as well */
-        if (strncmp(encodedSignature, test.encoded_expected_signature, signature_len) == 0) {
-            fprintf(stdout, "[SUCCESS] Generated signature matches the test vector\n");
-        } else {
-            fprintf(stdout, "[FAILURE] Generated signature DOES NOT MATCH the test vector\n");
-            rc = -1;
-            goto exit;
-        }
-    } else {
-        if (test.encoded_expected_signature != NULL) {
-            if (strncmp(encodedSignature, test.encoded_expected_signature, signature_len) == 0) {
-                fprintf(stdout, "[FAILURE] Generated signature UNEXPECTEDLY matches the test vector\n");
-                rc = -1;
-                goto exit;
-            } else {
-                fprintf(stdout, "[SUCCESS] Generated signature DOES NOT MATCH the test vector as EXPECTED\n");
-            }
-        }
-    }
-
-    /*
-     * use verify call to verify the signature, we will reuse the same input_data object
-     * which will either have the message or the hashed_message, but the digest will already be set as required
-     */
-    fprintf(stderr, "[INFO] verifying the signature....\n");
-
     /* To be clean lets get a fresh public key and create a new evp_pkey from it */
     EVP_PKEY_get_raw_public_key(decoded_testcase.private_key, NULL, &pubkey_len);
     raw_pubkey = malloc(pubkey_len);
@@ -387,17 +666,28 @@ static int test_sign_and_verify(Decoded_TestCase decoded_testcase, TestCase test
 
     public_key = EVP_PKEY_new_raw_public_key_ex(NULL, test.key_type, NULL, raw_pubkey, pubkey_len);
 
+    /* create a new context, leaving the data has is */
     if (create_ctx_data(test, det_mode, &hashmldsa_ctx, NULL, NULL) != 0) {
         rc = -1;
         goto exit;
     };
 
-    if (HASHMLDSA_verify(hashmldsa_ctx, public_key, hashmldsa_data, signature, signature_len))
-        fprintf(stdout, "[SUCCESS] verification successful\n");
-    else {
-        fprintf(stdout, "[FAILURE] did not verify against the public key\n");
-        HASHMLDSA_print_last_error(stderr);
+    /*
+     * use verify call to verify the signature, we will reuse the same input_data object
+     * which will either have the message or the hashed_message, but the digest will already be set as required
+     */
+    fprintf(stderr, "[INFO] verifying the single shot signature....\n");
+    if (perform_verify(decoded_testcase, test, hashmldsa_ctx, hashmldsa_data, public_key, hash_mode, signature, signature_len) == -1) {
         rc = -1;
+        goto exit;
+    }
+
+    if (signature_multi) {
+        fprintf(stderr, "[INFO] verifying the multi shot signature....\n");
+        if (perform_verify(decoded_testcase, test, hashmldsa_ctx, hashmldsa_data, public_key, hash_mode, signature_multi, signature_len) == -1) {
+            rc = -1;
+            goto exit;
+        }
     }
 
 exit:
@@ -416,11 +706,11 @@ exit:
     if (signature)
         OPENSSL_free(signature);
 
+    if (signature_multi)
+        OPENSSL_free(signature_multi);
+
     if (raw_pubkey)
         free(raw_pubkey);
-
-    if (encodedSignature)
-        free(encodedSignature);
 
     if (hashed_message)
         free(hashed_message);
@@ -430,8 +720,16 @@ exit:
     return rc;
 }
 
-static void run_test(int i, Decoded_TestCase decoded_testcase, TestCase test, char det_mode, char hash_mode, int *total_passed, int *total_failed, int *test_failed, create_context_and_data create_ctx_data) {
-
+static void run_test(int test_no,
+                     Decoded_TestCase decoded_testcase,
+                     TestCase test,
+                     char det_mode,
+                     char hash_mode,
+                     int *total_passed,
+                     int *total_failed,
+                     int *test_failed,
+                     create_context_and_data create_ctx_data)
+{
     int rc = 0;
     unsigned char* det_mode_str = NULL;
     unsigned char* hash_mode_str = NULL;
@@ -439,23 +737,23 @@ static void run_test(int i, Decoded_TestCase decoded_testcase, TestCase test, ch
     det_mode_str = det_mode == 'd' ? "Deterministic" : "Non-Deterministic";
     hash_mode_str = hash_mode == 'r' ? "NO " : "";
 
-    fprintf(stdout, "Test %d: %s Test with %spre-hashed message\n", i, det_mode_str, hash_mode_str);
+    fprintf(stdout, "Test %d: %s Test with %spre-hashed message\n", test_no, det_mode_str, hash_mode_str);
     rc = test_sign_and_verify(decoded_testcase, test, det_mode, hash_mode, create_ctx_data);
     if (test.failure_expected == NULL) {
         if (rc == 0) {
-            fprintf(stdout, "Test %d: [PASSED] %s Test with %spre-hashed message\n", i, det_mode_str, hash_mode_str);
+            fprintf(stdout, "Test %d: [PASSED] %s Test with %spre-hashed message\n", test_no, det_mode_str, hash_mode_str);
             (*total_passed)++;
         } else {
-            fprintf(stdout, "Test %d: [FAILED] %s Test with %spre-hashed message\n", i, det_mode_str, hash_mode_str);
+            fprintf(stdout, "Test %d: [FAILED] %s Test with %spre-hashed message\n", test_no, det_mode_str, hash_mode_str);
             (*total_failed)++;
             (*test_failed)++;
         }
     } else {
         if (rc != 0) {
-            fprintf(stdout, "Test %d: [PASSED] Expected Failure \"%s\", %s Test with %spre-hashed message\n", i, test.failure_expected, det_mode_str, hash_mode_str);
+            fprintf(stdout, "Test %d: [PASSED] Expected Failure \"%s\", %s Test with %spre-hashed message\n", test_no, test.failure_expected, det_mode_str, hash_mode_str);
             (*total_passed)++;
         } else {
-            fprintf(stdout, "Test %d: [FAILED] %s Test with %spre-hashed message, it did not fail when expected\n", i, det_mode_str, hash_mode_str);
+            fprintf(stdout, "Test %d: [FAILED] %s Test with %spre-hashed message, it did not fail when expected\n", test_no, det_mode_str, hash_mode_str);
             (*total_failed)++;
             (*test_failed)++;
         }
@@ -463,13 +761,14 @@ static void run_test(int i, Decoded_TestCase decoded_testcase, TestCase test, ch
 }
 
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     int total_passed = 0;  // MEND seems to think this might contain sensitive information. Not a great parser
     int total_failed = 0;
     int test_failed = 0;
     int numTestcases = 0;
     int i, j;
-    int rc = 0;
+
     create_context_and_data create_ctx_with_data;
     Decoded_TestCase decoded_testcase;
     TestCase test;
